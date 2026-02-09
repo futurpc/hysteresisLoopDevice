@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="400" height="300" viewBox="0 0 400 300" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Gradient for the hysteresis loop -->
+    <linearGradient id="loopGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#00ff88;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#00ffcc;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#00ff88;stop-opacity:1" />
+    </linearGradient>
+    <!-- Glow effect -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="400" height="300" fill="#1a1a2e"/>
+
+  <!-- Coordinate axes -->
+  <line x1="50" y1="150" x2="350" y2="150" stroke="#333355" stroke-width="1"/>
+  <line x1="200" y1="40" x2="200" y2="260" stroke="#333355" stroke-width="1"/>
+
+  <!-- Axis labels -->
+  <text x="355" y="155" fill="#666688" font-family="monospace" font-size="12">H</text>
+  <text x="205" y="35" fill="#666688" font-family="monospace" font-size="12">B</text>
+
+  <!-- Hysteresis Loop - the classic S-curve with memory -->
+  <!-- Upper curve (increasing H) -->
+  <path d="M 80,150
+           C 100,150 120,180 140,200
+           C 160,220 180,230 200,230
+           C 240,230 280,200 300,150
+           C 310,120 315,100 320,80"
+        fill="none"
+        stroke="url(#loopGradient)"
+        stroke-width="4"
+        stroke-linecap="round"
+        filter="url(#glow)"/>
+
+  <!-- Lower curve (decreasing H) -->
+  <path d="M 320,80
+           C 315,60 310,50 300,50
+           C 280,50 240,80 200,80
+           C 160,80 140,100 120,120
+           C 100,140 90,150 80,150"
+        fill="none"
+        stroke="url(#loopGradient)"
+        stroke-width="4"
+        stroke-linecap="round"
+        filter="url(#glow)"/>
+
+  <!-- Animated dot on the loop -->
+  <circle r="6" fill="#ffffff" filter="url(#glow)">
+    <animateMotion dur="4s" repeatCount="indefinite">
+      <mpath href="#loopPath"/>
+    </animateMotion>
+  </circle>
+
+  <!-- Hidden path for animation -->
+  <path id="loopPath"
+        d="M 80,150 C 100,150 120,180 140,200 C 160,220 180,230 200,230 C 240,230 280,200 300,150 C 310,120 315,100 320,80 C 315,60 310,50 300,50 C 280,50 240,80 200,80 C 160,80 140,100 120,120 C 100,140 90,150 80,150"
+        fill="none"
+        stroke="none"/>
+
+  <!-- Title -->
+  <text x="200" y="280"
+        fill="#00ffaa"
+        font-family="monospace"
+        font-size="18"
+        font-weight="bold"
+        text-anchor="middle"
+        filter="url(#glow)">
+    HYSTERESIS LOOP DEVICE
+  </text>
+</svg>

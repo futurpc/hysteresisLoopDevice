@@ -1,0 +1,55 @@
+// Hysteresis Loop Device - Plymouth Boot Script (Simple Version)
+
+// Set background color
+Window.SetBackgroundTopColor(0.10, 0.10, 0.18);
+Window.SetBackgroundBottomColor(0.04, 0.04, 0.08);
+
+// Calculate center
+screen_width = Window.GetWidth();
+screen_height = Window.GetHeight();
+
+// Load and display logo
+logo_image = Image("logo.png");
+logo_sprite = Sprite(logo_image);
+logo_x = screen_width / 2 - logo_image.GetWidth() / 2;
+logo_y = screen_height / 2 - logo_image.GetHeight() / 2 - 30;
+logo_sprite.SetPosition(logo_x, logo_y, 1);
+logo_sprite.SetOpacity(1);
+
+// Progress bar background
+progress_bg = Image("progress-bg.png");
+progress_bg_sprite = Sprite(progress_bg);
+progress_bg_x = screen_width / 2 - progress_bg.GetWidth() / 2;
+progress_bg_y = logo_y + logo_image.GetHeight() + 20;
+progress_bg_sprite.SetPosition(progress_bg_x, progress_bg_y, 1);
+
+// Progress bar (will be scaled)
+progress_image = Image("progress-bar.png");
+progress_sprite = Sprite();
+progress_x = progress_bg_x + 4;
+progress_y = progress_bg_y + 4;
+progress_sprite.SetPosition(progress_x, progress_y, 2);
+
+// Track progress
+global.progress = 0;
+
+fun boot_progress_cb(time, prog) {
+    if (prog > global.progress)
+        global.progress = prog;
+
+    if (global.progress > 0) {
+        new_width = progress_image.GetWidth() * global.progress;
+        if (new_width < 1)
+            new_width = 1;
+        scaled = progress_image.Scale(new_width, progress_image.GetHeight());
+        progress_sprite.SetImage(scaled);
+    }
+}
+Plymouth.SetBootProgressFunction(boot_progress_cb);
+
+fun quit_cb() {
+    logo_sprite.SetOpacity(0);
+    progress_sprite.SetOpacity(0);
+    progress_bg_sprite.SetOpacity(0);
+}
+Plymouth.SetQuitFunction(quit_cb);

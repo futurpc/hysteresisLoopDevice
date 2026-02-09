@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Hysteresis Loop Device
+Description=Boot splash for Hysteresis Loop Device
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/hysteresis
+ScriptFile=/usr/share/plymouth/themes/hysteresis/hysteresis.script
