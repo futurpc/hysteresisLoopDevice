@@ -170,15 +170,15 @@ public class SignalAnalyzerApp extends Application {
 
         Label ch1Label = new Label("1:");
         ch1Label.setTextFill(Color.web("#00ff88"));
-        ch1Label.setFont(Font.font("System", FontWeight.BOLD, 14));
+        ch1Label.setFont(Font.font("System", FontWeight.BOLD, 12));
 
         channelSelect = new ComboBox<>();
         for (int i = 0; i < 8; i++) {
             channelSelect.getItems().add("CH" + i);
         }
         channelSelect.setValue("CH1");
-        channelSelect.setStyle("-fx-font-size: 13px;");
-        channelSelect.setPrefWidth(75);
+        channelSelect.setStyle("-fx-font-size: 11px;");
+        channelSelect.setPrefWidth(70);
         channelSelect.setOnAction(e -> {
             String selected = channelSelect.getValue();
             selectedChannel = Integer.parseInt(selected.substring(2));
@@ -190,15 +190,15 @@ public class SignalAnalyzerApp extends Application {
 
         Label ch2Label = new Label("2:");
         ch2Label.setTextFill(Color.web("#00aaff"));
-        ch2Label.setFont(Font.font("System", FontWeight.BOLD, 14));
+        ch2Label.setFont(Font.font("System", FontWeight.BOLD, 12));
 
         channelSelect2 = new ComboBox<>();
         for (int i = 0; i < 8; i++) {
             channelSelect2.getItems().add("CH" + i);
         }
         channelSelect2.setValue("CH2");
-        channelSelect2.setStyle("-fx-font-size: 13px;");
-        channelSelect2.setPrefWidth(75);
+        channelSelect2.setStyle("-fx-font-size: 11px;");
+        channelSelect2.setPrefWidth(70);
         channelSelect2.setOnAction(e -> {
             String selected = channelSelect2.getValue();
             selectedChannel2 = Integer.parseInt(selected.substring(2));
@@ -207,6 +207,14 @@ public class SignalAnalyzerApp extends Application {
             }
             clearBuffer();
         });
+
+        // Stack channel selectors vertically
+        HBox ch1Row = new HBox(2, ch1Label, channelSelect);
+        ch1Row.setAlignment(Pos.CENTER_LEFT);
+        HBox ch2Row = new HBox(2, ch2Label, channelSelect2);
+        ch2Row.setAlignment(Pos.CENTER_LEFT);
+        VBox channelColumn = new VBox(2, ch1Row, ch2Row);
+        channelColumn.setAlignment(Pos.CENTER);
 
         startButton = new Button("START");
         startButton.setStyle("-fx-background-color: #4CAF50; -fx-text-fill: white; -fx-font-size: 14px; -fx-font-weight: bold; -fx-padding: 8 20;");
@@ -241,7 +249,7 @@ public class SignalAnalyzerApp extends Application {
         maxLabel.setTextFill(Color.web("#888899"));
         maxLabel.setId("maxLabel");
 
-        controlsRow.getChildren().addAll(ch1Label, channelSelect, ch2Label, channelSelect2, startButton, stopButton, modeContButton, modeIntervalButton, autoScaleButton, acButton, minLabel, maxLabel);
+        controlsRow.getChildren().addAll(channelColumn, startButton, stopButton, modeContButton, modeIntervalButton, autoScaleButton, acButton, minLabel, maxLabel);
 
         // Continuous mode row (samples/frame, trigger, zoom)
         continuousRow = new HBox(15);
