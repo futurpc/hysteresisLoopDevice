@@ -1,6 +1,7 @@
 package com.ad9833;
 
 import java.io.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * MCP3208 12-bit 8-channel SPI ADC Controller
@@ -23,16 +24,56 @@ public class MCP3208Controller implements AutoCloseable {
 
     private final boolean verbose;
     private boolean initialized = false;
+    private volatile double lastSampleDurationSeconds = 0;
+    private volatile double lastMeasuredFrequency = 0;
+    private boolean hasNativeHelper = false;
+
+    // Shared continuous sampling thread
+    private Thread samplerThread;
+    private volatile boolean samplerRunning = false;
+    private volatile int samplerChannel = 1;
+    private volatile int samplerSamples = 1000;
+    private volatile int[] latestRawSamples = new int[0];
+    private volatile double latestSampleDuration = 0;
+    private volatile double latestFrequency = 0;
+    private final AtomicInteger activeConsumers = new AtomicInteger(0);
+
+    // Dual-channel mode for X-Y plotting
+    private volatile int samplerChannelY = -1;  // -1 = single-channel mode
+    private volatile int[] latestRawSamplesX = new int[0];
+    private volatile int[] latestRawSamplesY = new int[0];
+    private volatile boolean dualChannelMode = false;
+
+    // Singleton
+    private static MCP3208Controller sharedInstance;
 
     public MCP3208Controller(boolean verbose) throws Exception {
         this.verbose = verbose;
         log("Initializing MCP3208 Controller (spidev mode)");
 
-        // Test that spidev is available
+        // Check if native C helper is available
+        try {
+            ProcessBuilder pb = new ProcessBuilder(System.getProperty("user.home") + "/adc_sample", "0", "1");
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
+            String line = r.readLine();
+            p.waitFor();
+            if (line != null && p.exitValue() == 0) {
+                hasNativeHelper = true;
+                initialized = true;
+                log("Using native C helper for SPI1");
+                return;
+            }
+        } catch (Exception e) {
+            log("Native helper not available: %s", e.getMessage());
+        }
+
+        // Fallback: test that spidev is available via Python
         String test = readChannelViaPython(0);
         if (test != null) {
             initialized = true;
-            log("SPI1 initialized successfully");
+            log("SPI1 initialized successfully (Python mode)");
         } else {
             throw new Exception("Failed to initialize SPI1");
         }
@@ -40,6 +81,13 @@ public class MCP3208Controller implements AutoCloseable {
 
     public MCP3208Controller() throws Exception {
         this(false);
+    }
+
+    public static synchronized MCP3208Controller getShared() throws Exception {
+        if (sharedInstance == null) {
+            sharedInstance = new MCP3208Controller();
+        }
+        return sharedInstance;
     }
 
     private void log(String format, Object... args) {
@@ -150,19 +198,65 @@ public class MCP3208Controller implements AutoCloseable {
             throw new IllegalStateException("MCP3208 not initialized");
         }
 
+        if (hasNativeHelper) {
+            return sampleFastNative(channel, samples);
+        }
+        return sampleFastPython(channel, samples);
+    }
+
+    private int[] sampleFastNative(int channel, int samples) {
+        try {
+            String helper = System.getProperty("user.home") + "/adc_sample";
+            ProcessBuilder pb = new ProcessBuilder(helper, String.valueOf(channel), String.valueOf(samples));
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            String valuesLine = reader.readLine();
+            String timeLine = reader.readLine();
+            String freqLine = reader.readLine();
+            process.waitFor();
+
+            if (timeLine != null) {
+                try { lastSampleDurationSeconds = Double.parseDouble(timeLine.trim()); }
+                catch (NumberFormatException ignored) {}
+            }
+            if (freqLine != null) {
+                try { lastMeasuredFrequency = Double.parseDouble(freqLine.trim()); }
+                catch (NumberFormatException ignored) {}
+            }
+
+            if (valuesLine != null && !valuesLine.isEmpty()) {
+                String[] parts = valuesLine.trim().split("\\s+");
+                int[] data = new int[parts.length];
+                for (int i = 0; i < parts.length; i++) {
+                    data[i] = Integer.parseInt(parts[i]);
+                }
+                return data;
+            }
+        } catch (Exception e) {
+            log("Native sample error: %s", e.getMessage());
+        }
+        return new int[0];
+    }
+
+    private int[] sampleFastPython(int channel, int samples) {
         String pythonCode = String.format(
-            "import spidev\n" +
+            "import spidev,time\n" +
             "spi=spidev.SpiDev()\n" +
             "spi.open(1,0)\n" +
             "spi.max_speed_hz=1000000\n" +
             "spi.mode=0\n" +
             "ch=%d\n" +
             "vals=[]\n" +
+            "t0=time.monotonic()\n" +
             "for _ in range(%d):\n" +
             "  cmd=[0x06|((ch&0x04)>>2),(ch&0x03)<<6,0x00]\n" +
             "  r=spi.xfer2(cmd)\n" +
             "  vals.append(((r[1]&0x0F)<<8)|r[2])\n" +
+            "t1=time.monotonic()\n" +
             "print(' '.join(map(str,vals)))\n" +
+            "print(t1-t0)\n" +
             "spi.close()",
             channel, samples
         );
@@ -174,7 +268,13 @@ public class MCP3208Controller implements AutoCloseable {
 
             BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
             String result = reader.readLine();
+            String timeLine = reader.readLine();
             process.waitFor();
+
+            if (timeLine != null) {
+                try { lastSampleDurationSeconds = Double.parseDouble(timeLine.trim()); }
+                catch (NumberFormatException ignored) {}
+            }
 
             if (result != null && !result.isEmpty()) {
                 String[] parts = result.trim().split("\\s+");
@@ -187,8 +287,22 @@ public class MCP3208Controller implements AutoCloseable {
         } catch (Exception e) {
             log("Batch sample error: %s", e.getMessage());
         }
-
         return new int[0];
+    }
+
+    /**
+     * Get the duration of the last sampleFast call's sampling loop (seconds).
+     */
+    public double getLastSampleDurationSeconds() {
+        return lastSampleDurationSeconds;
+    }
+
+    /**
+     * Get the frequency measured by the native C helper using per-sample timestamps.
+     * Returns 0 if not available (Python fallback or no signal detected).
+     */
+    public double getLastMeasuredFrequency() {
+        return lastMeasuredFrequency;
     }
 
     /**
@@ -221,9 +335,204 @@ public class MCP3208Controller implements AutoCloseable {
         return 12;
     }
 
+    // ========== Shared Continuous Sampling ==========
+
+    public synchronized void startContinuousSampling(int channel, int samples) {
+        samplerChannel = channel;
+        samplerSamples = samples;
+        activeConsumers.incrementAndGet();
+        if (samplerThread == null || !samplerThread.isAlive()) {
+            samplerRunning = true;
+            samplerThread = new Thread(() -> {
+                while (samplerRunning) {
+                    try {
+                        int[] raw = sampleFast(samplerChannel, samplerSamples);
+                        latestRawSamples = raw;
+                        latestSampleDuration = lastSampleDurationSeconds;
+                        latestFrequency = lastMeasuredFrequency;
+                        Thread.sleep(33);
+                    } catch (InterruptedException e) {
+                        break;
+                    } catch (Exception e) {
+                        // Continue on sampling errors
+                    }
+                }
+            }, "adc-sampler");
+            samplerThread.setDaemon(true);
+            samplerThread.start();
+        }
+    }
+
+    public synchronized void stopContinuousSampling() {
+        if (activeConsumers.decrementAndGet() <= 0) {
+            activeConsumers.set(0);
+            dualChannelMode = false;
+            samplerChannelY = -1;
+            stopSamplerThread();
+        }
+    }
+
+    private void stopSamplerThread() {
+        samplerRunning = false;
+        if (samplerThread != null) {
+            samplerThread.interrupt();
+            samplerThread = null;
+        }
+    }
+
+    public int[] getLatestSamples() {
+        return latestRawSamples;
+    }
+
+    public double getLatestSampleDuration() {
+        return latestSampleDuration;
+    }
+
+    public double getLatestFrequency() {
+        return latestFrequency;
+    }
+
+    public void setSamplerChannel(int channel) {
+        samplerChannel = channel;
+    }
+
+    public void setSamplerSamples(int samples) {
+        samplerSamples = samples;
+    }
+
+    // ========== Dual-Channel Sampling (X-Y Plot) ==========
+
+    /**
+     * Fast interleaved dual-channel sampling via Python.
+     * Alternates CH_X, CH_Y reads in a tight loop for paired samples.
+     * @param chX X-axis channel (0-7)
+     * @param chY Y-axis channel (0-7)
+     * @param pairs Number of (X,Y) sample pairs
+     * @return int[2][] where [0]=X samples, [1]=Y samples
+     */
+    public int[][] sampleFastDualChannel(int chX, int chY, int pairs) throws Exception {
+        if (!initialized) {
+            throw new IllegalStateException("MCP3208 not initialized");
+        }
+
+        String pythonCode = String.format(
+            "import spidev,time\n" +
+            "spi=spidev.SpiDev()\n" +
+            "spi.open(1,0)\n" +
+            "spi.max_speed_hz=1000000\n" +
+            "spi.mode=0\n" +
+            "chX=%d\n" +
+            "chY=%d\n" +
+            "cmdX=[0x06|((chX&0x04)>>2),(chX&0x03)<<6,0x00]\n" +
+            "cmdY=[0x06|((chY&0x04)>>2),(chY&0x03)<<6,0x00]\n" +
+            "xs=[]\n" +
+            "ys=[]\n" +
+            "t0=time.monotonic()\n" +
+            "for _ in range(%d):\n" +
+            "  r=spi.xfer2(list(cmdX))\n" +
+            "  xs.append(((r[1]&0x0F)<<8)|r[2])\n" +
+            "  r=spi.xfer2(list(cmdY))\n" +
+            "  ys.append(((r[1]&0x0F)<<8)|r[2])\n" +
+            "t1=time.monotonic()\n" +
+            "print(' '.join(map(str,xs)))\n" +
+            "print(' '.join(map(str,ys)))\n" +
+            "print(t1-t0)\n" +
+            "spi.close()",
+            chX, chY, pairs
+        );
+
+        try {
+            ProcessBuilder pb = new ProcessBuilder("python3", "-c", pythonCode);
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            String xLine = reader.readLine();
+            String yLine = reader.readLine();
+            String timeLine = reader.readLine();
+            process.waitFor();
+
+            if (timeLine != null) {
+                try { lastSampleDurationSeconds = Double.parseDouble(timeLine.trim()); }
+                catch (NumberFormatException ignored) {}
+            }
+
+            int[][] result = new int[2][];
+            if (xLine != null && !xLine.isEmpty() && yLine != null && !yLine.isEmpty()) {
+                String[] xParts = xLine.trim().split("\\s+");
+                String[] yParts = yLine.trim().split("\\s+");
+                result[0] = new int[xParts.length];
+                result[1] = new int[yParts.length];
+                for (int i = 0; i < xParts.length; i++) {
+                    result[0][i] = Integer.parseInt(xParts[i]);
+                }
+                for (int i = 0; i < yParts.length; i++) {
+                    result[1][i] = Integer.parseInt(yParts[i]);
+                }
+                return result;
+            }
+        } catch (Exception e) {
+            log("Dual-channel sample error: %s", e.getMessage());
+        }
+        return new int[][] { new int[0], new int[0] };
+    }
+
+    /**
+     * Start continuous dual-channel sampling for X-Y plotting.
+     */
+    public synchronized void startDualContinuousSampling(int chX, int chY, int pairs) {
+        samplerChannel = chX;
+        samplerChannelY = chY;
+        samplerSamples = pairs;
+        dualChannelMode = true;
+        activeConsumers.incrementAndGet();
+        if (samplerThread == null || !samplerThread.isAlive()) {
+            samplerRunning = true;
+            samplerThread = new Thread(() -> {
+                while (samplerRunning) {
+                    try {
+                        if (dualChannelMode) {
+                            int[][] xy = sampleFastDualChannel(samplerChannel, samplerChannelY, samplerSamples);
+                            latestRawSamplesX = xy[0];
+                            latestRawSamplesY = xy[1];
+                            latestSampleDuration = lastSampleDurationSeconds;
+                        } else {
+                            int[] raw = sampleFast(samplerChannel, samplerSamples);
+                            latestRawSamples = raw;
+                            latestSampleDuration = lastSampleDurationSeconds;
+                            latestFrequency = lastMeasuredFrequency;
+                        }
+                        Thread.sleep(33);
+                    } catch (InterruptedException e) {
+                        break;
+                    } catch (Exception e) {
+                        // Continue on sampling errors
+                    }
+                }
+            }, "adc-sampler");
+            samplerThread.setDaemon(true);
+            samplerThread.start();
+        }
+    }
+
+    public int[] getLatestSamplesX() {
+        return latestRawSamplesX;
+    }
+
+    public int[] getLatestSamplesY() {
+        return latestRawSamplesY;
+    }
+
+    public void setSamplerChannels(int chX, int chY) {
+        samplerChannel = chX;
+        samplerChannelY = chY;
+    }
+
     @Override
     public void close() {
         log("Shutting down...");
+        activeConsumers.set(0);
+        stopSamplerThread();
         initialized = false;
         log("Shutdown complete");
     }

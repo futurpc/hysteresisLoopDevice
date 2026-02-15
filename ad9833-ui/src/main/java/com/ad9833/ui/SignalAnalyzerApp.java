@@ -30,6 +30,7 @@ public class SignalAnalyzerApp extends Application {
     private Canvas waveformCanvas;
     private GraphicsContext gc;
     private Label voltageLabel;
+    private Label freqLabel;
     private Label statusLabel;
     private ComboBox<String> channelSelect;
     private Button startButton;
@@ -45,6 +46,7 @@ public class SignalAnalyzerApp extends Application {
     private int samplesPerFrame = 1000;  // Batch sample count - max by default
     private double[] buffer = new double[BUFFER_SIZE];
     private int bufferIndex = 0;
+    private int[] lastProcessedSamples = null;  // Skip duplicate frames
 
     // Auto-scale
     private boolean autoScale = true;  // Enabled by default
@@ -60,12 +62,28 @@ public class SignalAnalyzerApp extends Application {
     private boolean triggerEnabled = true;  // Enabled by default
     private double triggerLevel = 0.1;  // Slightly above 0 for stable trigger
     private boolean triggerRising = true;  // Rising edge trigger
+    private double triggerFraction = 0;  // Sub-sample interpolation offset
     private Button triggerButton;
 
     // AC coupling (DC offset removal)
     private boolean acCoupling = true;  // Enabled by default - center around 0
     private double dcOffset = 0.0;
     private Button acButton;
+
+    // Mode: continuous vs interval
+    private boolean intervalMode = false;
+    private Button modeContButton;
+    private Button modeIntervalButton;
+
+    // Interval mode
+    private static final int INTERVAL_SAMPLES = 2000;
+    private volatile int intervalSeconds = 5;
+    private volatile boolean intervalPaused = false;
+    private Thread intervalThread;
+    private HBox intervalRow;
+    private HBox continuousRow;
+    private Button[] intervalBtns;
+    private Button pauseBtn;
 
     /**
      * Called from MainMenuApp to start with a back button
@@ -83,8 +101,8 @@ public class SignalAnalyzerApp extends Application {
     private void startInternal(Stage primaryStage) {
         primaryStage.setTitle("Signal Analyzer");
 
-        VBox root = new VBox(10);
-        root.setPadding(new Insets(15));
+        VBox root = new VBox(5);
+        root.setPadding(new Insets(8));
         root.setAlignment(Pos.TOP_CENTER);
         root.setStyle("-fx-background-color: #1a1a2e;");
 
@@ -114,12 +132,17 @@ public class SignalAnalyzerApp extends Application {
         titleRow.getChildren().addAll(titleLabel, statusLabel);
 
         // Voltage display
-        voltageLabel = new Label("0.000 V");
+        voltageLabel = new Label("-- Vpp");
         voltageLabel.setFont(Font.font("Monospace", FontWeight.BOLD, 36));
         voltageLabel.setTextFill(Color.web("#00ff88"));
 
+        // Frequency display
+        freqLabel = new Label("-- Hz");
+        freqLabel.setFont(Font.font("Monospace", FontWeight.BOLD, 22));
+        freqLabel.setTextFill(Color.web("#ffcc00"));
+
         // Waveform canvas
-        waveformCanvas = new Canvas(760, 250);
+        waveformCanvas = new Canvas(760, 220);
         gc = waveformCanvas.getGraphicsContext2D();
         drawGrid();
 
@@ -145,6 +168,9 @@ public class SignalAnalyzerApp extends Application {
         channelSelect.setOnAction(e -> {
             String selected = channelSelect.getValue();
             selectedChannel = Integer.parseInt(selected.substring(2));
+            if (controller != null) {
+                controller.setSamplerChannel(selectedChannel);
+            }
             clearBuffer();
         });
 
@@ -177,11 +203,20 @@ public class SignalAnalyzerApp extends Application {
         maxLabel.setTextFill(Color.web("#888899"));
         maxLabel.setId("maxLabel");
 
-        controlsRow.getChildren().addAll(chLabel, channelSelect, startButton, stopButton, autoScaleButton, acButton, minLabel, maxLabel);
+        // Mode toggle buttons
+        modeContButton = new Button("CONT");
+        modeContButton.setStyle("-fx-background-color: #ff9800; -fx-text-fill: white; -fx-font-size: 12px; -fx-font-weight: bold; -fx-padding: 6 8;");
+        modeContButton.setOnAction(e -> setMode(false));
 
-        // Sampling controls row
-        HBox samplingRow = new HBox(15);
-        samplingRow.setAlignment(Pos.CENTER);
+        modeIntervalButton = new Button("INTRVL");
+        modeIntervalButton.setStyle("-fx-background-color: #666666; -fx-text-fill: white; -fx-font-size: 12px; -fx-font-weight: bold; -fx-padding: 6 8;");
+        modeIntervalButton.setOnAction(e -> setMode(true));
+
+        controlsRow.getChildren().addAll(chLabel, channelSelect, startButton, stopButton, modeContButton, modeIntervalButton, autoScaleButton, acButton, minLabel, maxLabel);
+
+        // Continuous mode row (samples/frame, trigger, zoom)
+        continuousRow = new HBox(15);
+        continuousRow.setAlignment(Pos.CENTER);
 
         Label sampleLabel = new Label("Samples/frame:");
         sampleLabel.setTextFill(Color.WHITE);
@@ -200,6 +235,9 @@ public class SignalAnalyzerApp extends Application {
         samplingSlider.valueProperty().addListener((obs, oldVal, newVal) -> {
             samplesPerFrame = newVal.intValue();
             samplingLabel.setText(String.valueOf(samplesPerFrame));
+            if (controller != null) {
+                controller.setSamplerSamples(samplesPerFrame);
+            }
         });
 
         // Trigger button (rising edge)
@@ -218,9 +256,38 @@ public class SignalAnalyzerApp extends Application {
             zoomPercent = newVal.intValue();
         });
 
-        samplingRow.getChildren().addAll(sampleLabel, samplingSlider, samplingLabel, triggerButton, zoomLabel, zoomSlider);
+        continuousRow.getChildren().addAll(sampleLabel, samplingSlider, samplingLabel, triggerButton, zoomLabel, zoomSlider);
 
-        root.getChildren().addAll(titleRow, voltageLabel, canvasContainer, controlsRow, samplingRow);
+        // Interval mode row (interval buttons + pause)
+        intervalRow = new HBox(10);
+        intervalRow.setAlignment(Pos.CENTER);
+
+        Label intLabel = new Label("Interval:");
+        intLabel.setTextFill(Color.WHITE);
+        intLabel.setFont(Font.font("System", FontWeight.BOLD, 14));
+
+        int[] intervals = {1, 5, 10, 20};
+        intervalBtns = new Button[intervals.length];
+        for (int i = 0; i < intervals.length; i++) {
+            final int secs = intervals[i];
+            intervalBtns[i] = new Button(secs + "s");
+            intervalBtns[i].setStyle(secs == intervalSeconds
+                ? "-fx-background-color: #ff9800; -fx-text-fill: white; -fx-font-size: 14px; -fx-padding: 6 14;"
+                : "-fx-background-color: #444444; -fx-text-fill: white; -fx-font-size: 14px; -fx-padding: 6 14;");
+            intervalBtns[i].setOnAction(ev -> selectInterval(secs));
+        }
+
+        pauseBtn = new Button("PAUSE");
+        pauseBtn.setStyle("-fx-background-color: #444444; -fx-text-fill: white; -fx-font-size: 14px; -fx-font-weight: bold; -fx-padding: 6 14;");
+        pauseBtn.setOnAction(ev -> selectPause());
+
+        intervalRow.getChildren().add(intLabel);
+        for (Button b : intervalBtns) intervalRow.getChildren().add(b);
+        intervalRow.getChildren().add(pauseBtn);
+        intervalRow.setVisible(false);
+        intervalRow.setManaged(false);
+
+        root.getChildren().addAll(titleRow, voltageLabel, freqLabel, canvasContainer, controlsRow, continuousRow, intervalRow);
 
         Scene scene = new Scene(root, 800, 480);
         scene.setCursor(Cursor.NONE);
@@ -244,7 +311,7 @@ public class SignalAnalyzerApp extends Application {
 
     private void initController() {
         try {
-            controller = new MCP3208Controller();
+            controller = MCP3208Controller.getShared();
             statusLabel.setText("● Ready");
             statusLabel.setTextFill(Color.YELLOW);
         } catch (Exception e) {
@@ -258,39 +325,135 @@ public class SignalAnalyzerApp extends Application {
         if (controller == null) return;
 
         isRunning = true;
-        statusLabel.setText("● Sampling");
-        statusLabel.setTextFill(Color.LIME);
         startButton.setDisable(true);
         stopButton.setDisable(false);
         channelSelect.setDisable(true);
+        modeContButton.setDisable(true);
+        modeIntervalButton.setDisable(true);
+
+        if (intervalMode) {
+            statusLabel.setText("● Interval");
+            statusLabel.setTextFill(Color.LIME);
+            startIntervalSampling();
+        } else {
+            statusLabel.setText("● Sampling");
+            statusLabel.setTextFill(Color.LIME);
+            startContinuousSampling();
+        }
+    }
+
+    private void startContinuousSampling() {
+        controller.startContinuousSampling(selectedChannel, samplesPerFrame);
 
         timer = new AnimationTimer() {
             private long lastUpdate = 0;
 
             @Override
             public void handle(long now) {
-                // Update at ~30Hz, but collect multiple samples per frame
+                // Update at ~30Hz
                 if (now - lastUpdate >= 33_000_000) {  // ~30fps
                     lastUpdate = now;
-                    try {
-                        // Batch sample for better waveform resolution
-                        int[] samples = controller.sampleFast(selectedChannel, samplesPerFrame);
-                        for (int raw : samples) {
-                            double voltage = (raw * 3.3) / 4095.0;
-                            addToBuffer(voltage);
-                        }
-                        // Update display with last sample
-                        if (samples.length > 0) {
-                            double lastVoltage = (samples[samples.length - 1] * 3.3) / 4095.0;
-                            updateDisplay(lastVoltage);
-                        }
-                    } catch (Exception e) {
-                        // Ignore read errors during sampling
-                    }
+                    int[] samples = controller.getLatestSamples();
+                    if (samples.length == 0 || samples == lastProcessedSamples) return;
+                    lastProcessedSamples = samples;
+
+                    processAndDisplaySamples(samples);
                 }
             }
         };
         timer.start();
+    }
+
+    private void startIntervalSampling() {
+        intervalPaused = false;
+        intervalThread = new Thread(() -> {
+            while (isRunning) {
+                try {
+                    int[] samples = controller.sampleFast(selectedChannel, INTERVAL_SAMPLES);
+
+                    if (samples.length > 0) {
+                        Platform.runLater(() -> processAndDisplaySamples(samples));
+                    }
+
+                    // Wait for interval or pause
+                    if (intervalPaused) {
+                        Platform.runLater(() -> {
+                            statusLabel.setText("● Paused");
+                            statusLabel.setTextFill(Color.YELLOW);
+                        });
+                        while (intervalPaused && isRunning) {
+                            Thread.sleep(100);
+                        }
+                        if (isRunning) {
+                            Platform.runLater(() -> {
+                                statusLabel.setText("● Interval");
+                                statusLabel.setTextFill(Color.LIME);
+                            });
+                        }
+                    } else {
+                        Thread.sleep(intervalSeconds * 1000L);
+                    }
+                } catch (InterruptedException e) {
+                    break;
+                } catch (Exception e) {
+                    try { Thread.sleep(1000); } catch (InterruptedException ie) { break; }
+                }
+            }
+        }, "sa-interval-sampler");
+        intervalThread.setDaemon(true);
+        intervalThread.start();
+    }
+
+    /**
+     * Shared processing for both modes: trigger, buffer fill, display update.
+     */
+    private void processAndDisplaySamples(int[] samples) {
+        // Convert all raw samples to voltages
+        double[] voltages = new double[samples.length];
+        double sum = 0;
+        for (int i = 0; i < samples.length; i++) {
+            voltages[i] = (samples[i] * 3.3) / 4095.0;
+            sum += voltages[i];
+        }
+
+        // Pre-compute DC offset for trigger search
+        double tempDc = acCoupling ? sum / voltages.length : 0;
+
+        // Find trigger in full sample array
+        int trigStart = 0;
+        triggerFraction = 0;
+        if (triggerEnabled && voltages.length > BUFFER_SIZE) {
+            int searchEnd = voltages.length - BUFFER_SIZE;
+            for (int i = 1; i < searchEnd; i++) {
+                double prev = voltages[i - 1] - tempDc;
+                double curr = voltages[i] - tempDc;
+                if (prev < triggerLevel && curr >= triggerLevel) {
+                    trigStart = i - 1;
+                    double denom = curr - prev;
+                    triggerFraction = (denom != 0) ? (triggerLevel - prev) / denom : 0;
+                    break;
+                }
+            }
+        }
+
+        // Fill display buffer starting from trigger point
+        int count = Math.min(BUFFER_SIZE, voltages.length - trigStart);
+        for (int i = 0; i < count; i++) {
+            buffer[i] = voltages[trigStart + i];
+        }
+        bufferIndex = count % BUFFER_SIZE;
+
+        // Update display
+        updateDisplay();
+
+        // Display frequency
+        double measuredFreq = controller.getLatestFrequency();
+        if (measuredFreq > 0) {
+            smoothedFreq = smoothedFreq == 0 ? measuredFreq : smoothedFreq * 0.7 + measuredFreq * 0.3;
+            freqLabel.setText(formatFreq(smoothedFreq));
+        } else {
+            freqLabel.setText("-- Hz");
+        }
     }
 
     private void stopSampling() {
@@ -299,11 +462,20 @@ public class SignalAnalyzerApp extends Application {
             timer.stop();
             timer = null;
         }
+        if (intervalThread != null) {
+            intervalThread.interrupt();
+            intervalThread = null;
+        }
+        if (controller != null && !intervalMode) {
+            controller.stopContinuousSampling();
+        }
         statusLabel.setText("● Stopped");
         statusLabel.setTextFill(Color.RED);
         startButton.setDisable(false);
         stopButton.setDisable(true);
         channelSelect.setDisable(false);
+        modeContButton.setDisable(false);
+        modeIntervalButton.setDisable(false);
     }
 
     private void addToBuffer(double voltage) {
@@ -311,10 +483,19 @@ public class SignalAnalyzerApp extends Application {
         bufferIndex = (bufferIndex + 1) % BUFFER_SIZE;
     }
 
-    private void updateDisplay(double voltage) {
-        // Update voltage label (show AC-coupled value if enabled)
-        double displayVoltage = acCoupling ? (voltage - dcOffset) : voltage;
-        voltageLabel.setText(String.format("%+.3f V", displayVoltage));
+    private void updateDisplay() {
+        // Compute Vpp from buffer (AC-coupled values)
+        double min = Double.MAX_VALUE;
+        double max = -Double.MAX_VALUE;
+        for (double v : buffer) {
+            double adjusted = v - dcOffset;
+            if (adjusted < min) min = adjusted;
+            if (adjusted > max) max = adjusted;
+        }
+        if (min != Double.MAX_VALUE && max != -Double.MAX_VALUE) {
+            double vpp = max - min;
+            voltageLabel.setText(String.format("%.3f Vpp", vpp));
+        }
 
         // Redraw waveform
         drawWaveform();
@@ -390,11 +571,15 @@ public class SignalAnalyzerApp extends Application {
             gc.strokeLine(0, zeroY, w, zeroY);
         }
 
-        // Find trigger point
-        int startOffset = triggerEnabled ? findTriggerPoint() : 0;
+        // Buffer is pre-aligned to trigger in AnimationTimer — no re-search needed
+        int startOffset = 0;
 
         // Calculate how many samples to display based on zoom
         int displaySamples = (BUFFER_SIZE * zoomPercent) / 100;
+
+        // Sub-sample X offset from trigger interpolation (computed during pre-alignment)
+        double pixelsPerSample = w / displaySamples;
+        double xOffset = triggerEnabled ? -triggerFraction * pixelsPerSample : 0;
 
         // Draw waveform
         gc.setStroke(Color.web("#00ff88"));
@@ -404,8 +589,8 @@ public class SignalAnalyzerApp extends Application {
         boolean first = true;
 
         for (int i = 0; i < displaySamples; i++) {
-            int idx = (bufferIndex + startOffset + i) % BUFFER_SIZE;
-            double x = (double) i / displaySamples * w;
+            int idx = startOffset + i;
+            double x = (double) i / displaySamples * w + xOffset;
             // Apply AC coupling (subtract DC offset)
             double voltage = buffer[idx] - dcOffset;
             // Scale voltage to screen coordinates
@@ -496,6 +681,7 @@ public class SignalAnalyzerApp extends Application {
         // Find where signal crosses trigger level (rising edge)
         // Use AC-coupled values for trigger detection
         int searchRange = BUFFER_SIZE - (BUFFER_SIZE * zoomPercent / 100);  // Leave room for display
+        triggerFraction = 0;
         for (int i = 1; i < searchRange; i++) {
             int prevIdx = (bufferIndex + i - 1) % BUFFER_SIZE;
             int currIdx = (bufferIndex + i) % BUFFER_SIZE;
@@ -505,13 +691,16 @@ public class SignalAnalyzerApp extends Application {
             double currV = buffer[currIdx] - dcOffset;
 
             if (triggerRising) {
-                // Rising edge: previous below trigger, current above trigger
                 if (prevV < triggerLevel && currV >= triggerLevel) {
+                    // Interpolate sub-sample position
+                    double denom = currV - prevV;
+                    triggerFraction = (denom != 0) ? (triggerLevel - prevV) / denom : 0;
                     return i;
                 }
             } else {
-                // Falling edge: previous above trigger, current below trigger
                 if (prevV > triggerLevel && currV <= triggerLevel) {
+                    double denom = prevV - currV;
+                    triggerFraction = (denom != 0) ? (prevV - triggerLevel) / denom : 0;
                     return i;
                 }
             }
@@ -558,6 +747,54 @@ public class SignalAnalyzerApp extends Application {
         }
     }
 
+    private double smoothedFreq = 0;
+
+    private String formatFreq(double f) {
+        if (f >= 1e6) return String.format("%.2f MHz", f / 1e6);
+        if (f >= 1e3) return String.format("%.2f kHz", f / 1e3);
+        return String.format("%.1f Hz", f);
+    }
+
+    private void setMode(boolean interval) {
+        if (isRunning) return;
+        intervalMode = interval;
+        if (intervalMode) {
+            modeContButton.setStyle("-fx-background-color: #666666; -fx-text-fill: white; -fx-font-size: 12px; -fx-font-weight: bold; -fx-padding: 6 8;");
+            modeIntervalButton.setStyle("-fx-background-color: #ff9800; -fx-text-fill: white; -fx-font-size: 12px; -fx-font-weight: bold; -fx-padding: 6 8;");
+            continuousRow.setVisible(false);
+            continuousRow.setManaged(false);
+            intervalRow.setVisible(true);
+            intervalRow.setManaged(true);
+        } else {
+            modeContButton.setStyle("-fx-background-color: #ff9800; -fx-text-fill: white; -fx-font-size: 12px; -fx-font-weight: bold; -fx-padding: 6 8;");
+            modeIntervalButton.setStyle("-fx-background-color: #666666; -fx-text-fill: white; -fx-font-size: 12px; -fx-font-weight: bold; -fx-padding: 6 8;");
+            continuousRow.setVisible(true);
+            continuousRow.setManaged(true);
+            intervalRow.setVisible(false);
+            intervalRow.setManaged(false);
+        }
+    }
+
+    private void selectInterval(int seconds) {
+        intervalSeconds = seconds;
+        intervalPaused = false;
+        int[] intervals = {1, 5, 10, 20};
+        for (int i = 0; i < intervalBtns.length; i++) {
+            intervalBtns[i].setStyle(intervals[i] == seconds
+                ? "-fx-background-color: #ff9800; -fx-text-fill: white; -fx-font-size: 14px; -fx-padding: 6 14;"
+                : "-fx-background-color: #444444; -fx-text-fill: white; -fx-font-size: 14px; -fx-padding: 6 14;");
+        }
+        pauseBtn.setStyle("-fx-background-color: #444444; -fx-text-fill: white; -fx-font-size: 14px; -fx-font-weight: bold; -fx-padding: 6 14;");
+    }
+
+    private void selectPause() {
+        intervalPaused = true;
+        for (Button btn : intervalBtns) {
+            btn.setStyle("-fx-background-color: #444444; -fx-text-fill: white; -fx-font-size: 14px; -fx-padding: 6 14;");
+        }
+        pauseBtn.setStyle("-fx-background-color: #ff9800; -fx-text-fill: white; -fx-font-size: 14px; -fx-font-weight: bold; -fx-padding: 6 14;");
+    }
+
     private void clearBuffer() {
         Arrays.fill(buffer, 0);
         bufferIndex = 0;
@@ -565,10 +802,8 @@ public class SignalAnalyzerApp extends Application {
     }
 
     private void shutdown() {
-        if (controller != null) {
-            controller.close();
-            controller = null;
-        }
+        // Don't close the shared controller — other consumers may still use it
+        controller = null;
     }
 
     public static void main(String[] args) {

@@ -1,6 +1,7 @@
 package com.ad9833.ui;
 
 import com.ad9833.AD9833WebServer;
+import com.ad9833.MCP3208Controller;
 import com.google.zxing.BarcodeFormat;
 import com.google.zxing.common.BitMatrix;
 import com.google.zxing.qrcode.QRCodeWriter;
@@ -44,8 +45,8 @@ public class MainMenuApp extends Application {
         primaryStage = stage;
         primaryStage.setTitle("Hysteresis Loop Device");
 
-        VBox root = new VBox(8);
-        root.setPadding(new Insets(15));
+        VBox root = new VBox(5);
+        root.setPadding(new Insets(10));
         root.setAlignment(Pos.CENTER);
         root.setStyle("-fx-background-color: #1a1a2e;");
 
@@ -66,7 +67,7 @@ public class MainMenuApp extends Application {
             "-fx-text-fill: white;" +
             "-fx-font-size: 20px;" +
             "-fx-font-weight: bold;" +
-            "-fx-padding: 15 60;" +
+            "-fx-padding: 12 60;" +
             "-fx-background-radius: 10;"
         );
         generatorBtn.setOnAction(e -> openGenerator());
@@ -82,7 +83,7 @@ public class MainMenuApp extends Application {
             "-fx-text-fill: white;" +
             "-fx-font-size: 20px;" +
             "-fx-font-weight: bold;" +
-            "-fx-padding: 15 60;" +
+            "-fx-padding: 12 60;" +
             "-fx-background-radius: 10;"
         );
         analyzerBtn.setOnAction(e -> openAnalyzer());
@@ -91,6 +92,22 @@ public class MainMenuApp extends Application {
         anaDesc.setTextFill(Color.web("#666677"));
         anaDesc.setFont(Font.font("System", 12));
 
+        // Hysteresis Loop button
+        Button hysteresisBtn = new Button("HYSTERESIS LOOP");
+        hysteresisBtn.setStyle(
+            "-fx-background-color: #E91E63;" +
+            "-fx-text-fill: white;" +
+            "-fx-font-size: 20px;" +
+            "-fx-font-weight: bold;" +
+            "-fx-padding: 12 60;" +
+            "-fx-background-radius: 10;"
+        );
+        hysteresisBtn.setOnAction(e -> openHysteresisLoop());
+
+        Label hystDesc = new Label("MCP3208 - X-Y plot, B-H curve");
+        hystDesc.setTextFill(Color.web("#666677"));
+        hystDesc.setFont(Font.font("System", 12));
+
         // WiFi button
         Button wifiBtn = new Button("WIFI");
         wifiBtn.setStyle(
@@ -98,7 +115,7 @@ public class MainMenuApp extends Application {
             "-fx-text-fill: white;" +
             "-fx-font-size: 20px;" +
             "-fx-font-weight: bold;" +
-            "-fx-padding: 15 60;" +
+            "-fx-padding: 12 60;" +
             "-fx-background-radius: 10;"
         );
         wifiBtn.setOnAction(e -> openWifi());
@@ -111,9 +128,9 @@ public class MainMenuApp extends Application {
         VBox qrBox = createQrSection();
 
         // Main content: buttons left, QR right
-        VBox buttonsBox = new VBox(8);
+        VBox buttonsBox = new VBox(5);
         buttonsBox.setAlignment(Pos.CENTER);
-        buttonsBox.getChildren().addAll(generatorBtn, genDesc, analyzerBtn, anaDesc, wifiBtn, wifiDesc);
+        buttonsBox.getChildren().addAll(generatorBtn, genDesc, analyzerBtn, anaDesc, hysteresisBtn, hystDesc, wifiBtn, wifiDesc);
 
         HBox contentRow = new HBox(20);
         contentRow.setAlignment(Pos.CENTER);
@@ -157,6 +174,11 @@ public class MainMenuApp extends Application {
         analyzerApp.startWithBackButton(primaryStage, this::returnToMenu);
     }
 
+    private void openHysteresisLoop() {
+        HysteresisLoopApp loopApp = new HysteresisLoopApp();
+        loopApp.startWithBackButton(primaryStage, this::returnToMenu);
+    }
+
     private void openWifi() {
         WiFiApp wifiApp = new WiFiApp();
         wifiApp.startWithBackButton(primaryStage, this::returnToMenu);
@@ -169,7 +191,8 @@ public class MainMenuApp extends Application {
     private void startWebServer() {
         new Thread(() -> {
             try {
-                webServer = new AD9833WebServer(WEB_PORT);
+                MCP3208Controller sharedAdc = MCP3208Controller.getShared();
+                webServer = new AD9833WebServer(WEB_PORT, sharedAdc);
                 webServer.start();
                 System.out.println("Web server started on port " + WEB_PORT);
             } catch (Exception e) {

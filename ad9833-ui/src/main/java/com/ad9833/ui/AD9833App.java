@@ -265,9 +265,40 @@ public class AD9833App extends Application {
 
     private void initController() {
         try {
-            controller = new AD9833Controller();
-            statusLabel.setText("● Ready");
-            statusLabel.setTextFill(Color.YELLOW);
+            controller = AD9833Controller.getShared();
+            if (controller.isRunning()) {
+                // Restore UI to match running state
+                isRunning = true;
+                double freq = controller.getFrequency();
+                double phase = controller.getPhase();
+                Waveform waveform = controller.getWaveform();
+
+                // Restore frequency slider/display
+                if (freq > 0) {
+                    frequencySlider.setValue(Math.log10(freq));
+                    frequencyInput.setText(String.format("%.0f", freq));
+                    frequencyDisplay.setText(formatFrequency(freq));
+                }
+
+                // Restore phase slider
+                phaseSlider.setValue(phase);
+
+                // Restore waveform selection
+                for (Toggle toggle : waveformGroup.getToggles()) {
+                    if (toggle.getUserData() == waveform) {
+                        toggle.setSelected(true);
+                        break;
+                    }
+                }
+
+                statusLabel.setText("● Running");
+                statusLabel.setTextFill(Color.LIME);
+                startButton.setDisable(true);
+                stopButton.setDisable(false);
+            } else {
+                statusLabel.setText("● Ready");
+                statusLabel.setTextFill(Color.YELLOW);
+            }
         } catch (Exception e) {
             showError("Failed to initialize: " + e.getMessage());
             statusLabel.setText("● Error");
@@ -287,6 +318,7 @@ public class AD9833App extends Application {
             controller.setWaveform(waveform);
 
             isRunning = true;
+            controller.setRunning(true);
             statusLabel.setText("● Running");
             statusLabel.setTextFill(Color.LIME);
             startButton.setDisable(true);
@@ -355,13 +387,8 @@ public class AD9833App extends Application {
     }
 
     private void shutdown() {
-        if (controller != null) {
-            try {
-                controller.stop();
-            } catch (Exception ignored) {
-            }
-            controller.close();
-        }
+        // Don't close the shared controller — keep generator running while switching views
+        controller = null;
     }
 
     public static void main(String[] args) {

@@ -35,6 +35,10 @@ public class AD9833Controller implements AutoCloseable {
     private double currentFrequency = 0;
     private double currentPhase = 0;
     private Waveform currentWaveform = Waveform.SINE;
+    private volatile boolean running = false;
+
+    // Singleton
+    private static AD9833Controller sharedInstance;
 
     public enum Waveform {
         SINE,
@@ -65,6 +69,17 @@ public class AD9833Controller implements AutoCloseable {
 
     public AD9833Controller() throws Exception {
         this(25_000_000, false);
+    }
+
+    public static synchronized AD9833Controller getShared() throws Exception {
+        if (sharedInstance == null) {
+            sharedInstance = new AD9833Controller();
+        }
+        return sharedInstance;
+    }
+
+    public boolean isRunning() {
+        return running;
     }
 
     private void log(String format, Object... args) {
@@ -124,6 +139,11 @@ public class AD9833Controller implements AutoCloseable {
     public void stop() throws Exception {
         log("STOP: Putting AD9833 in reset mode");
         writeWord(CTRL_B28 | CTRL_RESET);
+        running = false;
+    }
+
+    public void setRunning(boolean running) {
+        this.running = running;
     }
 
     public void setFrequency(double frequencyHz) throws Exception {
