@@ -54,9 +54,18 @@ public class AD9833Controller implements AutoCloseable {
         log("Initializing AD9833 Controller (pigpio mode)");
         log("Reference clock: %,d Hz", referenceClockHz);
 
-        // Open SPI using pigpio
+        // Open SPI using pigpio — close stale handles first if pigpiod has leftovers from a killed process
         String result = pigs("spio 0 1000000 2");
-        spiHandle = Integer.parseInt(result.trim());
+        try {
+            spiHandle = Integer.parseInt(result.trim());
+        } catch (NumberFormatException e) {
+            log("SPI open failed (%s), closing stale handles and retrying...", result.trim());
+            for (int h = 0; h < 32; h++) {
+                try { pigs("spic " + h); } catch (Exception ignored) {}
+            }
+            result = pigs("spio 0 1000000 2");
+            spiHandle = Integer.parseInt(result.trim());
+        }
         log("SPI opened, handle: %d", spiHandle);
 
         // Reset the device
