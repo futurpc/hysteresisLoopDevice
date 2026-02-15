@@ -83,7 +83,7 @@ public class SignalAnalyzerApp extends Application {
     private Button modeIntervalButton;
 
     // Interval mode
-    private static final int INTERVAL_SAMPLES = 2000;
+    private int intervalSamples = 2000;
     private volatile int intervalSeconds = 5;
     private volatile boolean intervalPaused = false;
     private Thread intervalThread;
@@ -325,9 +325,25 @@ public class SignalAnalyzerApp extends Application {
         pauseBtn.setStyle("-fx-background-color: #444444; -fx-text-fill: white; -fx-font-size: 14px; -fx-font-weight: bold; -fx-padding: 6 14;");
         pauseBtn.setOnAction(ev -> selectPause());
 
+        Label intSamplesLabel = new Label("Smp:");
+        intSamplesLabel.setTextFill(Color.WHITE);
+        intSamplesLabel.setFont(Font.font("System", 12));
+
+        Label intSamplesValue = new Label("2000");
+        intSamplesValue.setTextFill(Color.web("#00aaff"));
+        intSamplesValue.setFont(Font.font("Monospace", FontWeight.BOLD, 12));
+
+        Slider intSamplesSlider = new Slider(500, 5000, 2000);
+        intSamplesSlider.setPrefWidth(100);
+        intSamplesSlider.setMajorTickUnit(1000);
+        intSamplesSlider.valueProperty().addListener((obs, oldVal, newVal) -> {
+            intervalSamples = newVal.intValue();
+            intSamplesValue.setText(String.valueOf(intervalSamples));
+        });
+
         intervalRow.getChildren().add(intLabel);
         for (Button b : intervalBtns) intervalRow.getChildren().add(b);
-        intervalRow.getChildren().add(pauseBtn);
+        intervalRow.getChildren().addAll(pauseBtn, intSamplesLabel, intSamplesSlider, intSamplesValue);
         intervalRow.setVisible(false);
         intervalRow.setManaged(false);
 
@@ -429,11 +445,11 @@ public class SignalAnalyzerApp extends Application {
                     int[] samplesX;
                     int[] samplesY;
                     if (dualChannel) {
-                        int[][] xy = controller.sampleFastDualChannel(selectedChannel, selectedChannel2, INTERVAL_SAMPLES);
+                        int[][] xy = controller.sampleFastDualChannel(selectedChannel, selectedChannel2, intervalSamples);
                         samplesX = xy[0];
                         samplesY = xy[1];
                     } else {
-                        samplesX = controller.sampleFast(selectedChannel, INTERVAL_SAMPLES);
+                        samplesX = controller.sampleFast(selectedChannel, intervalSamples);
                         samplesY = null;
                     }
 
