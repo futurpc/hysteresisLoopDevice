@@ -602,6 +602,7 @@ public class AD9833WebServer {
     let triggerLevel = 0.1;
     let scaleMin = -1.65, scaleMax = 1.65;
     let dcOffset = 0, dcOffset2 = 0, smoothedFreq = 0, trigFrac = 0;
+    let cycleLength = 0; // valid samples when interval mode extracts one cycle
 
     function toggleAuto() {
         autoScale = !autoScale;
@@ -670,28 +671,31 @@ public class AD9833WebServer {
     function drawWaveform() {
         let w = canvas.width, h = canvas.height;
 
+        // How many valid samples to use
+        let validSamples = (cycleLength > 0 && cycleLength < BUFFER_SIZE) ? cycleLength : BUFFER_SIZE;
+
         // DC offsets
         if (acCoupling) {
             let sum = 0;
-            for (let i = 0; i < BUFFER_SIZE; i++) sum += buffer[i];
-            dcOffset = sum / BUFFER_SIZE;
+            for (let i = 0; i < validSamples; i++) sum += buffer[i];
+            dcOffset = sum / validSamples;
             if (dualChannel) {
                 let sum2 = 0;
-                for (let i = 0; i < BUFFER_SIZE; i++) sum2 += buffer2[i];
-                dcOffset2 = sum2 / BUFFER_SIZE;
+                for (let i = 0; i < validSamples; i++) sum2 += buffer2[i];
+                dcOffset2 = sum2 / validSamples;
             } else { dcOffset2 = 0; }
         } else { dcOffset = 0; dcOffset2 = 0; }
 
         // Auto-scale from both channels
         if (autoScale) {
             let min = Infinity, max = -Infinity;
-            for (let i = 0; i < BUFFER_SIZE; i++) {
+            for (let i = 0; i < validSamples; i++) {
                 let v = buffer[i] - dcOffset;
                 if (v < min) min = v;
                 if (v > max) max = v;
             }
             if (dualChannel) {
-                for (let i = 0; i < BUFFER_SIZE; i++) {
+                for (let i = 0; i < validSamples; i++) {
                     let v2 = buffer2[i] - dcOffset2;
                     if (v2 < min) min = v2;
                     if (v2 > max) max = v2;
@@ -734,10 +738,16 @@ public class AD9833WebServer {
             ctx.beginPath(); ctx.moveTo(0,zy); ctx.lineTo(w,zy); ctx.stroke();
         }
 
-        let zoomPct = parseInt(document.getElementById('zoomSlider').value);
-        let dispSamples = Math.floor(BUFFER_SIZE * zoomPct / 100);
-        let pxPerSample = w / dispSamples;
-        let xOff = triggerEnabled ? -trigFrac * pxPerSample : 0;
+        let dispSamples;
+        let xOff = 0;
+        if (cycleLength > 0 && cycleLength < BUFFER_SIZE) {
+            dispSamples = cycleLength;
+        } else {
+            let zoomPct = parseInt(document.getElementById('zoomSlider').value);
+            dispSamples = Math.floor(BUFFER_SIZE * zoomPct / 100);
+            let pxPerSample = w / dispSamples;
+            xOff = triggerEnabled ? -trigFrac * pxPerSample : 0;
+        }
 
         // CH1 waveform (green)
         ctx.strokeStyle = '#00ff88'; ctx.lineWidth = 2; ctx.beginPath();
@@ -827,6 +837,28 @@ public class AD9833WebServer {
         } catch(e) {}
     }
 
+    function findCycleBounds(signal) {
+        let crossings = [];
+        for (let i = 1; i < signal.length; i++) {
+            if (signal[i-1] < 0 && signal[i] >= 0) crossings.push(i);
+        }
+        if (crossings.length < 2) return null;
+        let spacings = [];
+        for (let i = 1; i < crossings.length; i++) spacings.push(crossings[i] - crossings[i-1]);
+        spacings.sort((a,b) => a-b);
+        let medianPeriod = spacings[Math.floor(spacings.length / 2)];
+        if (medianPeriod < 10) return null;
+        let start = crossings[0];
+        let targetEnd = start + medianPeriod;
+        let bestEnd = -1, bestDist = Infinity;
+        for (let i = 1; i < crossings.length; i++) {
+            let dist = Math.abs(crossings[i] - targetEnd);
+            if (dist < bestDist) { bestDist = dist; bestEnd = crossings[i]; }
+        }
+        if (bestEnd <= start) return null;
+        return [start, bestEnd];
+    }
+
     function processFrame(data) {
         let voltages = data.v;
         let voltages2 = data.v2 || null;
@@ -834,6 +866,34 @@ public class AD9833WebServer {
         for (let i = 0; i < voltages.length; i++) sum += voltages[i];
         let tempDc = acCoupling ? sum / voltages.length : 0;
 
+        // Interval mode: extract single cycle
+        if (scopeMode === 'interval') {
+            let acSignal = new Float64Array(voltages.length);
+            for (let i = 0; i < voltages.length; i++) acSignal[i] = voltages[i] - tempDc;
+            let bounds = findCycleBounds(acSignal);
+            if (bounds) {
+                let cycleLen = bounds[1] - bounds[0];
+                let count = Math.min(BUFFER_SIZE, cycleLen);
+                for (let i = 0; i < count; i++) {
+                    buffer[i] = voltages[bounds[0] + i];
+                    if (dualChannel && voltages2 && bounds[0] + i < voltages2.length)
+                        buffer2[i] = voltages2[bounds[0] + i];
+                }
+                for (let i = count; i < BUFFER_SIZE; i++) buffer[i] = 0;
+                cycleLength = count;
+                // Compute frequency from cycle length
+                if (data.dt && data.dt > 0) {
+                    let sampleRate = voltages.length / (data.dt / 1e6);
+                    let freq = sampleRate / cycleLen;
+                    smoothedFreq = freq;
+                    document.getElementById('measuredFreq').textContent = formatFreqHz(freq);
+                }
+                return;
+            }
+            // Fallback: no cycle found, show all data
+        }
+
+        cycleLength = 0; // not in cycle mode
         let trigStart = 0;
         trigFrac = 0;
         if (triggerEnabled && voltages.length > BUFFER_SIZE) {
