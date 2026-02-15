@@ -742,6 +742,21 @@ public class SignalAnalyzerApp extends Application {
         gc.fillText(String.format("%.2fV", scaleMin), 5, h - 4);
     }
 
+    /** Catmull-Rom cubic interpolation: sample buf at fractional index fi (relative to offset). */
+    private double cubicSample(double[] buf, int offset, double fi, int n, double dc) {
+        int i1 = (int) fi;
+        double t = fi - i1;
+        int i0 = Math.max(0, i1 - 1);
+        int i2 = Math.min(n - 1, i1 + 1);
+        int i3 = Math.min(n - 1, i1 + 2);
+        double y0 = buf[offset + i0] - dc, y1 = buf[offset + i1] - dc;
+        double y2 = buf[offset + i2] - dc, y3 = buf[offset + i3] - dc;
+        double a = -0.5*y0 + 1.5*y1 - 1.5*y2 + 0.5*y3;
+        double b = y0 - 2.5*y1 + 2*y2 - 0.5*y3;
+        double c = -0.5*y0 + 0.5*y2;
+        return a*t*t*t + b*t*t + c*t + y1;
+    }
+
     private void drawWaveform() {
         double w = waveformCanvas.getWidth();
         double h = waveformCanvas.getHeight();
@@ -794,6 +809,10 @@ public class SignalAnalyzerApp extends Application {
         double pixelsPerSample = w / displaySamples;
         double xOffset = triggerEnabled ? -triggerFraction * pixelsPerSample : 0;
 
+        // Use cubic interpolation when few samples (e.g. single cycle with ~15 points)
+        boolean useInterp = displaySamples < 100;
+        int drawSteps = useInterp ? (int) w : displaySamples;
+
         // Draw channel 1 waveform (green)
         gc.setStroke(Color.web("#00ff88"));
         gc.setLineWidth(2);
@@ -801,10 +820,17 @@ public class SignalAnalyzerApp extends Application {
         gc.beginPath();
         boolean first = true;
 
-        for (int i = 0; i < displaySamples; i++) {
-            int idx = startOffset + i;
-            double x = (double) i / displaySamples * w + xOffset;
-            double voltage = buffer[idx] - dcOffset;
+        for (int s = 0; s < drawSteps; s++) {
+            double x, voltage;
+            if (useInterp) {
+                x = s + xOffset;
+                double fi = (double) s / w * (displaySamples - 1);
+                voltage = cubicSample(buffer, startOffset, fi, displaySamples, dcOffset);
+            } else {
+                int idx = startOffset + s;
+                x = (double) s / displaySamples * w + xOffset;
+                voltage = buffer[idx] - dcOffset;
+            }
             double normalizedV = (voltage - scaleMin) / range;
             double y = h - (normalizedV * h);
             y = Math.max(0, Math.min(h, y));
@@ -826,11 +852,18 @@ public class SignalAnalyzerApp extends Application {
             gc.beginPath();
             first = true;
 
-            for (int i = 0; i < displaySamples; i++) {
-                int idx = startOffset + i;
-                if (idx >= buffer2.length) break;
-                double x = (double) i / displaySamples * w + xOffset;
-                double voltage2 = buffer2[idx] - dcOffset2;
+            for (int s = 0; s < drawSteps; s++) {
+                double x, voltage2;
+                if (useInterp) {
+                    x = s + xOffset;
+                    double fi = (double) s / w * (displaySamples - 1);
+                    voltage2 = cubicSample(buffer2, startOffset, fi, displaySamples, dcOffset2);
+                } else {
+                    int idx = startOffset + s;
+                    if (idx >= buffer2.length) break;
+                    x = (double) s / displaySamples * w + xOffset;
+                    voltage2 = buffer2[idx] - dcOffset2;
+                }
                 double normalizedV2 = (voltage2 - scaleMin) / range;
                 double y2 = h - (normalizedV2 * h);
                 y2 = Math.max(0, Math.min(h, y2));

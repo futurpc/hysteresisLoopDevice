@@ -749,15 +749,35 @@ public class AD9833WebServer {
             xOff = triggerEnabled ? -trigFrac * pxPerSample : 0;
         }
 
+        // Catmull-Rom cubic interpolation: sample buf at fractional index fi
+        function cubicSample(buf, fi, n, dc) {
+            let i1 = Math.floor(fi), t = fi - i1;
+            let i0 = Math.max(0, i1 - 1), i2 = Math.min(n - 1, i1 + 1), i3 = Math.min(n - 1, i1 + 2);
+            let y0 = buf[i0]-dc, y1 = buf[i1]-dc, y2 = buf[i2]-dc, y3 = buf[i3]-dc;
+            let a = -0.5*y0 + 1.5*y1 - 1.5*y2 + 0.5*y3;
+            let b = y0 - 2.5*y1 + 2*y2 - 0.5*y3;
+            let c = -0.5*y0 + 0.5*y2;
+            return a*t*t*t + b*t*t + c*t + y1;
+        }
+        let useInterp = dispSamples < 100; // cubic interpolation when few samples
+        let drawSteps = useInterp ? w : dispSamples;
+
         // CH1 waveform (green)
         ctx.strokeStyle = '#00ff88'; ctx.lineWidth = 2; ctx.beginPath();
         let minV = Infinity, maxV = -Infinity;
-        for (let i = 0; i < dispSamples; i++) {
-            let x = i / dispSamples * w + xOff;
-            let v = buffer[i] - dcOffset;
+        for (let s = 0; s < drawSteps; s++) {
+            let x, v;
+            if (useInterp) {
+                x = s + xOff;
+                let fi = (s / w) * (dispSamples - 1);
+                v = cubicSample(buffer, fi, dispSamples, dcOffset);
+            } else {
+                x = s / dispSamples * w + xOff;
+                v = buffer[s] - dcOffset;
+            }
             if (v < minV) minV = v; if (v > maxV) maxV = v;
             let y = Math.max(0, Math.min(h, h - ((v - scaleMin) / range * h)));
-            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
         }
         ctx.stroke();
 
@@ -765,12 +785,19 @@ public class AD9833WebServer {
         let minV2 = Infinity, maxV2 = -Infinity;
         if (dualChannel) {
             ctx.strokeStyle = '#00aaff'; ctx.lineWidth = 2; ctx.beginPath();
-            for (let i = 0; i < dispSamples; i++) {
-                let x = i / dispSamples * w + xOff;
-                let v2 = buffer2[i] - dcOffset2;
+            for (let s = 0; s < drawSteps; s++) {
+                let x, v2;
+                if (useInterp) {
+                    x = s + xOff;
+                    let fi = (s / w) * (dispSamples - 1);
+                    v2 = cubicSample(buffer2, fi, dispSamples, dcOffset2);
+                } else {
+                    x = s / dispSamples * w + xOff;
+                    v2 = buffer2[s] - dcOffset2;
+                }
                 if (v2 < minV2) minV2 = v2; if (v2 > maxV2) maxV2 = v2;
                 let y = Math.max(0, Math.min(h, h - ((v2 - scaleMin) / range * h)));
-                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
             }
             ctx.stroke();
         }
