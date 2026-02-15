@@ -30,6 +30,7 @@ public class AD9833WebServer {
     // Analyzer state
     private volatile boolean analyzerRunning = false;
     private int analyzerChannel = 1;
+    private int analyzerChannel2 = -1; // -1 = OFF
     private int analyzerSamplesPerFrame = 1000;
 
     public AD9833WebServer(int port) throws Exception {
@@ -185,14 +186,20 @@ public class AD9833WebServer {
             if (params.containsKey("channel")) {
                 analyzerChannel = Integer.parseInt(params.get("channel"));
             }
+            if (params.containsKey("channel2")) {
+                String ch2 = params.get("channel2");
+                analyzerChannel2 = "off".equalsIgnoreCase(ch2) ? -1 : Integer.parseInt(ch2);
+            }
             if (params.containsKey("samples")) {
                 analyzerSamplesPerFrame = Integer.parseInt(params.get("samples"));
             }
             analyzerRunning = true;
             if (adcController != null) {
-                adcController.setSamplerChannel(analyzerChannel);
-                adcController.setSamplerSamples(analyzerSamplesPerFrame);
-                adcController.startContinuousSampling(analyzerChannel, analyzerSamplesPerFrame);
+                if (analyzerChannel2 >= 0) {
+                    adcController.startDualContinuousSampling(analyzerChannel, analyzerChannel2, analyzerSamplesPerFrame);
+                } else {
+                    adcController.startContinuousSampling(analyzerChannel, analyzerSamplesPerFrame);
+                }
             }
             sendJson(exchange, "{\"status\":\"ok\",\"running\":true}");
         }
@@ -229,8 +236,15 @@ public class AD9833WebServer {
                     }
 
                     try {
-                        int[] raw = adcController.getLatestSamples();
-                        if (raw.length == 0 || raw == lastSent) {
+                        int[] raw;
+                        int[] raw2 = null;
+                        if (analyzerChannel2 >= 0) {
+                            raw = adcController.getLatestSamplesX();
+                            raw2 = adcController.getLatestSamplesY();
+                        } else {
+                            raw = adcController.getLatestSamples();
+                        }
+                        if (raw == null || raw.length == 0 || raw == lastSent) {
                             Thread.sleep(33);
                             continue;
                         }
@@ -244,7 +258,17 @@ public class AD9833WebServer {
                             double voltage = (raw[i] * 3.3) / 4095.0;
                             sb.append(String.format("%.4f", voltage));
                         }
-                        sb.append("],\"dt\":").append(dtUs);
+                        sb.append("]");
+                        if (raw2 != null && raw2.length > 0) {
+                            sb.append(",\"v2\":[");
+                            for (int i = 0; i < raw2.length; i++) {
+                                if (i > 0) sb.append(',');
+                                double voltage = (raw2[i] * 3.3) / 4095.0;
+                                sb.append(String.format("%.4f", voltage));
+                            }
+                            sb.append("]");
+                        }
+                        sb.append(",\"dt\":").append(dtUs);
                         sb.append(",\"freq\":").append(String.format("%.2f", measuredFreq));
                         sb.append("}\n\n");
                         os.write(sb.toString().getBytes(StandardCharsets.UTF_8));
@@ -370,7 +394,8 @@ public class AD9833WebServer {
         <h2>Signal Analyzer</h2>
         <div class="scope-header">
             <span><span class="status-dot stopped" id="scopeDot"></span><span id="scopeStatus">Stopped</span></span>
-            <span class="voltage-display" id="voltageDisplay">-- Vpp</span>
+            <span class="voltage-display" id="voltageDisplay" style="color:#00ff88">CH1: -- Vpp</span>
+            <span class="voltage-display" id="voltageDisplay2" style="color:#00aaff">CH2: -- Vpp</span>
             <span class="measured-freq" id="measuredFreq">-- Hz</span>
         </div>
         <div class="canvas-wrap">
@@ -379,10 +404,19 @@ public class AD9833WebServer {
         <div class="scope-controls">
             <button class="scope-btn scope-start" onclick="startAnalyzer()">START</button>
             <button class="scope-btn scope-stop" onclick="stopAnalyzer()">STOP</button>
-            <select id="channelSel" onchange="scopeUpdateSettings()">
+            <span style="color:#00ff88;font-size:12px;font-weight:bold">1:</span>
+            <select id="channelSel" onchange="scopeUpdateSettings()" style="width:60px">
                 <option value="0">CH0</option>
                 <option value="1" selected>CH1</option>
                 <option value="2">CH2</option>
+                <option value="3">CH3</option>
+            </select>
+            <span style="color:#00aaff;font-size:12px;font-weight:bold">2:</span>
+            <select id="channelSel2" onchange="scopeUpdateSettings()" style="width:60px">
+                <option value="off">OFF</option>
+                <option value="0">CH0</option>
+                <option value="1">CH1</option>
+                <option value="2" selected>CH2</option>
                 <option value="3">CH3</option>
             </select>
             <button class="toggle-btn active" id="autoBtn" onclick="toggleAuto()">AUTO</button>
@@ -447,14 +481,16 @@ public class AD9833WebServer {
     const ctx = canvas.getContext('2d');
     const BUFFER_SIZE = 400;
     let buffer = new Float64Array(BUFFER_SIZE);
+    let buffer2 = new Float64Array(BUFFER_SIZE);
     let bufferIndex = 0;
     let eventSource = null;
     let scopeRunning = false;
+    let dualChannel = true;
 
     let autoScale = true, acCoupling = true, triggerEnabled = true;
     let triggerLevel = 0.1;
     let scaleMin = -1.65, scaleMax = 1.65;
-    let dcOffset = 0, smoothedFreq = 0, trigFrac = 0;
+    let dcOffset = 0, dcOffset2 = 0, smoothedFreq = 0, trigFrac = 0;
 
     function toggleAuto() {
         autoScale = !autoScale;
@@ -469,12 +505,19 @@ public class AD9833WebServer {
         triggerEnabled = !triggerEnabled;
         document.getElementById('trigBtn').className = triggerEnabled ? 'toggle-btn active' : 'toggle-btn';
     }
-    function scopeUpdateSettings() { buffer.fill(0); bufferIndex = 0; }
+    function scopeUpdateSettings() {
+        buffer.fill(0); buffer2.fill(0); bufferIndex = 0;
+        dualChannel = document.getElementById('channelSel2').value !== 'off';
+        document.getElementById('voltageDisplay2').style.display = dualChannel ? '' : 'none';
+    }
 
     async function startAnalyzer() {
         if (scopeRunning) return;
         let ch = document.getElementById('channelSel').value;
-        await fetch('/api/analyzer/start?channel=' + ch + '&samples=1000');
+        let ch2 = document.getElementById('channelSel2').value;
+        dualChannel = ch2 !== 'off';
+        document.getElementById('voltageDisplay2').style.display = dualChannel ? '' : 'none';
+        await fetch('/api/analyzer/start?channel=' + ch + '&channel2=' + ch2 + '&samples=1000');
         scopeRunning = true;
         document.getElementById('scopeDot').className = 'status-dot running';
         document.getElementById('scopeStatus').textContent = 'Sampling';
@@ -484,6 +527,7 @@ public class AD9833WebServer {
             let data = JSON.parse(e.data);
             if (data.error) { stopAnalyzer(); return; }
             let voltages = data.v;
+            let voltages2 = data.v2 || null;
 
             let sum = 0;
             for (let i = 0; i < voltages.length; i++) sum += voltages[i];
@@ -508,6 +552,11 @@ public class AD9833WebServer {
             let count = Math.min(BUFFER_SIZE, voltages.length - trigStart);
             for (let i = 0; i < count; i++) buffer[i] = voltages[trigStart + i];
             bufferIndex = count % BUFFER_SIZE;
+
+            if (dualChannel && voltages2) {
+                let count2 = Math.min(BUFFER_SIZE, voltages2.length - trigStart);
+                for (let i = 0; i < count2; i++) buffer2[i] = voltages2[trigStart + i];
+            }
 
             if (data.freq && data.freq > 0) {
                 smoothedFreq = smoothedFreq === 0 ? data.freq : smoothedFreq * 0.7 + data.freq * 0.3;
@@ -541,18 +590,32 @@ public class AD9833WebServer {
     function drawWaveform() {
         let w = canvas.width, h = canvas.height;
 
+        // DC offsets
         if (acCoupling) {
             let sum = 0;
             for (let i = 0; i < BUFFER_SIZE; i++) sum += buffer[i];
             dcOffset = sum / BUFFER_SIZE;
-        } else { dcOffset = 0; }
+            if (dualChannel) {
+                let sum2 = 0;
+                for (let i = 0; i < BUFFER_SIZE; i++) sum2 += buffer2[i];
+                dcOffset2 = sum2 / BUFFER_SIZE;
+            } else { dcOffset2 = 0; }
+        } else { dcOffset = 0; dcOffset2 = 0; }
 
+        // Auto-scale from both channels
         if (autoScale) {
             let min = Infinity, max = -Infinity;
             for (let i = 0; i < BUFFER_SIZE; i++) {
                 let v = buffer[i] - dcOffset;
                 if (v < min) min = v;
                 if (v > max) max = v;
+            }
+            if (dualChannel) {
+                for (let i = 0; i < BUFFER_SIZE; i++) {
+                    let v2 = buffer2[i] - dcOffset2;
+                    if (v2 < min) min = v2;
+                    if (v2 > max) max = v2;
+                }
             }
             if (min !== Infinity && max !== -Infinity && max > min) {
                 let range = max - min, margin = range * 0.1;
@@ -569,13 +632,12 @@ public class AD9833WebServer {
         let range = scaleMax - scaleMin;
         if (range <= 0) range = 3.3;
 
+        // Grid
         ctx.fillStyle = '#0a0a15';
         ctx.fillRect(0, 0, w, h);
-
         ctx.strokeStyle = '#222244'; ctx.lineWidth = 1;
         for (let i = 0; i <= 10; i++) { let x = i*w/10; ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,h); ctx.stroke(); }
         for (let i = 0; i <= 6; i++) { let y = i*h/6; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke(); }
-
         ctx.fillStyle = '#666688'; ctx.font = '11px monospace';
         ctx.fillText(scaleMax.toFixed(2)+'V', 5, 14);
         ctx.fillText(((scaleMax+scaleMin)/2).toFixed(2)+'V', 5, h/2+4);
@@ -597,6 +659,7 @@ public class AD9833WebServer {
         let pxPerSample = w / dispSamples;
         let xOff = triggerEnabled ? -trigFrac * pxPerSample : 0;
 
+        // CH1 waveform (green)
         ctx.strokeStyle = '#00ff88'; ctx.lineWidth = 2; ctx.beginPath();
         let minV = Infinity, maxV = -Infinity;
         for (let i = 0; i < dispSamples; i++) {
@@ -608,10 +671,28 @@ public class AD9833WebServer {
         }
         ctx.stroke();
 
+        // CH2 waveform (cyan)
+        let minV2 = Infinity, maxV2 = -Infinity;
+        if (dualChannel) {
+            ctx.strokeStyle = '#00aaff'; ctx.lineWidth = 2; ctx.beginPath();
+            for (let i = 0; i < dispSamples; i++) {
+                let x = i / dispSamples * w + xOff;
+                let v2 = buffer2[i] - dcOffset2;
+                if (v2 < minV2) minV2 = v2; if (v2 > maxV2) maxV2 = v2;
+                let y = Math.max(0, Math.min(h, h - ((v2 - scaleMin) / range * h)));
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+        }
+
+        // Stats
         document.getElementById('minStat').textContent = 'Min:' + (minV===Infinity ? '--' : (minV>=0?'+':'') + minV.toFixed(2)+'V');
         document.getElementById('maxStat').textContent = 'Max:' + (maxV===-Infinity ? '--' : (maxV>=0?'+':'') + maxV.toFixed(2)+'V');
         if (minV !== Infinity && maxV !== -Infinity) {
-            document.getElementById('voltageDisplay').textContent = (maxV-minV).toFixed(3) + ' Vpp';
+            document.getElementById('voltageDisplay').textContent = 'CH1: ' + (maxV-minV).toFixed(3) + ' Vpp';
+        }
+        if (dualChannel && minV2 !== Infinity && maxV2 !== -Infinity) {
+            document.getElementById('voltageDisplay2').textContent = 'CH2: ' + (maxV2-minV2).toFixed(3) + ' Vpp';
         }
     }
 
