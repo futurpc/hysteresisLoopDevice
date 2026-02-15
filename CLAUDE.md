@@ -126,21 +126,29 @@ Pi4J v2 didn't work with the AD9833 despite correct data. Solution: use `pigs` C
 - Large touch-friendly buttons
 - Font sizes: 14-18px
 
-## Build & Deploy
+## Build & Deploy — Dev Cycle
+
+Every change follows this cycle: **build → commit → deploy → restart**
 
 ```bash
-# Build locally
+# 1. Build locally
 cd ad9833-controller
 mvn clean package
 
-# Copy to Pi
-scp ad9833-ui/target/ad9833-ui.jar <PI_USER>@<PI_IP>:~/
+# 2. Commit (when changes are ready)
+git add <files> && git commit -m "message"
 
-# Run GUI on Pi
-DISPLAY=:0 java --module-path /usr/share/openjfx/lib \
-  --add-modules javafx.controls,javafx.fxml \
-  -jar ad9833-ui.jar
+# 3. Deploy jar to Pi
+sshpass -p 'spartak1' scp ad9833-ui/target/ad9833-ui.jar ras0001@192.168.68.179:~/
+
+# 4. Kill old app and restart on Pi
+sshpass -p 'spartak1' ssh ras0001@192.168.68.179 "pkill -f 'ad9833-ui.jar' 2>/dev/null; sleep 1; DISPLAY=:0 nohup java --module-path /usr/share/openjfx/lib --add-modules javafx.controls,javafx.fxml -jar ~/ad9833-ui.jar > /dev/null 2>&1 &"
+
+# 5. Verify app is running
+sshpass -p 'spartak1' ssh ras0001@192.168.68.179 "pgrep -f ad9833-ui.jar"
 ```
+
+**Pi connection**: `ssh ras0001@192.168.68.179` (see `pi-credentials.local`)
 
 ## Boot Splash (Plymouth)
 

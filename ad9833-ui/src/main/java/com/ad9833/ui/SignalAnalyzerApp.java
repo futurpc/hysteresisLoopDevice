@@ -30,9 +30,11 @@ public class SignalAnalyzerApp extends Application {
     private Canvas waveformCanvas;
     private GraphicsContext gc;
     private Label voltageLabel;
+    private Label voltageLabel2;
     private Label freqLabel;
     private Label statusLabel;
     private ComboBox<String> channelSelect;
+    private ComboBox<String> channelSelect2;
     private Button startButton;
     private Button stopButton;
     private Runnable onBackAction;
@@ -40,12 +42,15 @@ public class SignalAnalyzerApp extends Application {
     private AnimationTimer timer;
     private boolean isRunning = false;
     private int selectedChannel = 1;  // Default to CH1 (CH0 may have connection issues)
+    private int selectedChannel2 = 2; // Default to CH2
 
     // Waveform buffer
     private static final int BUFFER_SIZE = 400;
     private int samplesPerFrame = 1000;  // Batch sample count - max by default
     private double[] buffer = new double[BUFFER_SIZE];
+    private double[] buffer2 = new double[BUFFER_SIZE];
     private int bufferIndex = 0;
+    private int bufferIndex2 = 0;
     private int[] lastProcessedSamples = null;  // Skip duplicate frames
 
     // Auto-scale
@@ -68,6 +73,7 @@ public class SignalAnalyzerApp extends Application {
     // AC coupling (DC offset removal)
     private boolean acCoupling = true;  // Enabled by default - center around 0
     private double dcOffset = 0.0;
+    private double dcOffset2 = 0.0;
     private Button acButton;
 
     // Mode: continuous vs interval
@@ -131,10 +137,18 @@ public class SignalAnalyzerApp extends Application {
 
         titleRow.getChildren().addAll(titleLabel, statusLabel);
 
-        // Voltage display
-        voltageLabel = new Label("-- Vpp");
-        voltageLabel.setFont(Font.font("Monospace", FontWeight.BOLD, 36));
+        // Voltage display — two side-by-side labels
+        voltageLabel = new Label("CH1: -- Vpp");
+        voltageLabel.setFont(Font.font("Monospace", FontWeight.BOLD, 22));
         voltageLabel.setTextFill(Color.web("#00ff88"));
+
+        voltageLabel2 = new Label("CH2: -- Vpp");
+        voltageLabel2.setFont(Font.font("Monospace", FontWeight.BOLD, 22));
+        voltageLabel2.setTextFill(Color.web("#00aaff"));
+
+        HBox voltageRow = new HBox(20);
+        voltageRow.setAlignment(Pos.CENTER);
+        voltageRow.getChildren().addAll(voltageLabel, voltageLabel2);
 
         // Frequency display
         freqLabel = new Label("-- Hz");
@@ -154,9 +168,9 @@ public class SignalAnalyzerApp extends Application {
         HBox controlsRow = new HBox(8);
         controlsRow.setAlignment(Pos.CENTER);
 
-        Label chLabel = new Label("CH:");
-        chLabel.setTextFill(Color.WHITE);
-        chLabel.setFont(Font.font("System", FontWeight.BOLD, 14));
+        Label ch1Label = new Label("1:");
+        ch1Label.setTextFill(Color.web("#00ff88"));
+        ch1Label.setFont(Font.font("System", FontWeight.BOLD, 14));
 
         channelSelect = new ComboBox<>();
         for (int i = 0; i < 8; i++) {
@@ -169,7 +183,27 @@ public class SignalAnalyzerApp extends Application {
             String selected = channelSelect.getValue();
             selectedChannel = Integer.parseInt(selected.substring(2));
             if (controller != null) {
-                controller.setSamplerChannel(selectedChannel);
+                controller.setSamplerChannels(selectedChannel, selectedChannel2);
+            }
+            clearBuffer();
+        });
+
+        Label ch2Label = new Label("2:");
+        ch2Label.setTextFill(Color.web("#00aaff"));
+        ch2Label.setFont(Font.font("System", FontWeight.BOLD, 14));
+
+        channelSelect2 = new ComboBox<>();
+        for (int i = 0; i < 8; i++) {
+            channelSelect2.getItems().add("CH" + i);
+        }
+        channelSelect2.setValue("CH2");
+        channelSelect2.setStyle("-fx-font-size: 13px;");
+        channelSelect2.setPrefWidth(75);
+        channelSelect2.setOnAction(e -> {
+            String selected = channelSelect2.getValue();
+            selectedChannel2 = Integer.parseInt(selected.substring(2));
+            if (controller != null) {
+                controller.setSamplerChannels(selectedChannel, selectedChannel2);
             }
             clearBuffer();
         });
@@ -207,7 +241,7 @@ public class SignalAnalyzerApp extends Application {
         maxLabel.setTextFill(Color.web("#888899"));
         maxLabel.setId("maxLabel");
 
-        controlsRow.getChildren().addAll(chLabel, channelSelect, startButton, stopButton, modeContButton, modeIntervalButton, autoScaleButton, acButton, minLabel, maxLabel);
+        controlsRow.getChildren().addAll(ch1Label, channelSelect, ch2Label, channelSelect2, startButton, stopButton, modeContButton, modeIntervalButton, autoScaleButton, acButton, minLabel, maxLabel);
 
         // Continuous mode row (samples/frame, trigger, zoom)
         continuousRow = new HBox(15);
@@ -282,7 +316,7 @@ public class SignalAnalyzerApp extends Application {
         intervalRow.setVisible(false);
         intervalRow.setManaged(false);
 
-        root.getChildren().addAll(titleRow, voltageLabel, freqLabel, canvasContainer, controlsRow, continuousRow, intervalRow);
+        root.getChildren().addAll(titleRow, voltageRow, freqLabel, canvasContainer, controlsRow, continuousRow, intervalRow);
 
         Scene scene = new Scene(root, 800, 480);
         scene.setCursor(Cursor.NONE);
@@ -323,6 +357,7 @@ public class SignalAnalyzerApp extends Application {
         startButton.setDisable(true);
         stopButton.setDisable(false);
         channelSelect.setDisable(true);
+        channelSelect2.setDisable(true);
         modeContButton.setDisable(true);
         modeIntervalButton.setDisable(true);
 
@@ -338,7 +373,7 @@ public class SignalAnalyzerApp extends Application {
     }
 
     private void startContinuousSampling() {
-        controller.startContinuousSampling(selectedChannel, samplesPerFrame);
+        controller.startDualContinuousSampling(selectedChannel, selectedChannel2, samplesPerFrame);
 
         timer = new AnimationTimer() {
             private long lastUpdate = 0;
@@ -348,11 +383,13 @@ public class SignalAnalyzerApp extends Application {
                 // Update at ~30Hz
                 if (now - lastUpdate >= 33_000_000) {  // ~30fps
                     lastUpdate = now;
-                    int[] samples = controller.getLatestSamples();
-                    if (samples.length == 0 || samples == lastProcessedSamples) return;
-                    lastProcessedSamples = samples;
+                    int[] samplesX = controller.getLatestSamplesX();
+                    int[] samplesY = controller.getLatestSamplesY();
+                    if (samplesX == null || samplesX.length == 0 || samplesX == lastProcessedSamples) return;
+                    lastProcessedSamples = samplesX;
 
-                    processAndDisplaySamples(samples);
+                    int[] samplesY2 = (samplesY != null && samplesY.length == samplesX.length) ? samplesY : new int[samplesX.length];
+                    processAndDisplaySamples(samplesX, samplesY2);
                 }
             }
         };
@@ -364,10 +401,12 @@ public class SignalAnalyzerApp extends Application {
         intervalThread = new Thread(() -> {
             while (isRunning) {
                 try {
-                    int[] samples = controller.sampleFast(selectedChannel, INTERVAL_SAMPLES);
+                    int[][] xy = controller.sampleFastDualChannel(selectedChannel, selectedChannel2, INTERVAL_SAMPLES);
+                    int[] samplesX = xy[0];
+                    int[] samplesY = xy[1];
 
-                    if (samples.length > 0) {
-                        Platform.runLater(() -> processAndDisplaySamples(samples));
+                    if (samplesX.length > 0) {
+                        Platform.runLater(() -> processAndDisplaySamples(samplesX, samplesY));
                     }
 
                     // Wait for interval or pause
@@ -401,20 +440,25 @@ public class SignalAnalyzerApp extends Application {
 
     /**
      * Shared processing for both modes: trigger, buffer fill, display update.
+     * Uses channel 1 for trigger/cycle detection; applies same offset to both channels.
      */
-    private void processAndDisplaySamples(int[] samples) {
+    private void processAndDisplaySamples(int[] samples, int[] samples2) {
         // Convert all raw samples to voltages
         double[] voltages = new double[samples.length];
+        double[] voltages2 = new double[samples2.length];
         double sum = 0;
         for (int i = 0; i < samples.length; i++) {
             voltages[i] = (samples[i] * 3.3) / 4095.0;
             sum += voltages[i];
         }
+        for (int i = 0; i < samples2.length; i++) {
+            voltages2[i] = (samples2[i] * 3.3) / 4095.0;
+        }
 
-        // Pre-compute DC offset
+        // Pre-compute DC offset (from channel 1 for trigger detection)
         double tempDc = acCoupling ? sum / voltages.length : 0;
 
-        // In interval mode, extract one cycle first
+        // In interval mode, extract one cycle first (using channel 1 for detection)
         if (intervalMode) {
             double[] acVoltages = new double[voltages.length];
             for (int i = 0; i < voltages.length; i++) {
@@ -426,13 +470,16 @@ public class SignalAnalyzerApp extends Application {
                 int count = Math.min(BUFFER_SIZE, cycleLen);
                 for (int i = 0; i < count; i++) {
                     buffer[i] = voltages[bounds[0] + i];
+                    if (bounds[0] + i < voltages2.length) {
+                        buffer2[i] = voltages2[bounds[0] + i];
+                    }
                 }
-                // Zero-fill rest of buffer so display is clean
                 for (int i = count; i < BUFFER_SIZE; i++) {
                     buffer[i] = voltages[bounds[0]];
+                    buffer2[i] = (bounds[0] < voltages2.length) ? voltages2[bounds[0]] : 0;
                 }
                 bufferIndex = count;
-                // Estimate frequency from cycle length and sample duration
+                bufferIndex2 = count;
                 double duration = controller.getLastSampleDurationSeconds();
                 if (duration > 0) {
                     double sampleRate = samples.length / duration;
@@ -446,7 +493,7 @@ public class SignalAnalyzerApp extends Application {
             // Fallback: no cycle found, display all
         }
 
-        // Find trigger in full sample array
+        // Find trigger in full sample array (using channel 1)
         int trigStart = 0;
         triggerFraction = 0;
         if (triggerEnabled && voltages.length > BUFFER_SIZE) {
@@ -463,12 +510,17 @@ public class SignalAnalyzerApp extends Application {
             }
         }
 
-        // Fill display buffer starting from trigger point
+        // Fill both display buffers starting from trigger point
         int count = Math.min(BUFFER_SIZE, voltages.length - trigStart);
+        int count2 = Math.min(BUFFER_SIZE, voltages2.length - trigStart);
         for (int i = 0; i < count; i++) {
             buffer[i] = voltages[trigStart + i];
         }
+        for (int i = 0; i < count2; i++) {
+            buffer2[i] = voltages2[trigStart + i];
+        }
         bufferIndex = count % BUFFER_SIZE;
+        bufferIndex2 = count2 % BUFFER_SIZE;
 
         // Update display
         updateDisplay();
@@ -530,7 +582,7 @@ public class SignalAnalyzerApp extends Application {
             intervalThread.interrupt();
             intervalThread = null;
         }
-        if (controller != null && !intervalMode) {
+        if (controller != null) {
             controller.stopContinuousSampling();
         }
         statusLabel.setText("● Stopped");
@@ -538,6 +590,7 @@ public class SignalAnalyzerApp extends Application {
         startButton.setDisable(false);
         stopButton.setDisable(true);
         channelSelect.setDisable(false);
+        channelSelect2.setDisable(false);
         modeContButton.setDisable(false);
         modeIntervalButton.setDisable(false);
     }
@@ -548,7 +601,7 @@ public class SignalAnalyzerApp extends Application {
     }
 
     private void updateDisplay() {
-        // Compute Vpp from buffer (AC-coupled values)
+        // Compute Vpp from buffer 1 (AC-coupled values)
         double min = Double.MAX_VALUE;
         double max = -Double.MAX_VALUE;
         for (double v : buffer) {
@@ -558,7 +611,20 @@ public class SignalAnalyzerApp extends Application {
         }
         if (min != Double.MAX_VALUE && max != -Double.MAX_VALUE) {
             double vpp = max - min;
-            voltageLabel.setText(String.format("%.3f Vpp", vpp));
+            voltageLabel.setText(String.format("CH1: %.3f Vpp", vpp));
+        }
+
+        // Compute Vpp from buffer 2
+        double min2 = Double.MAX_VALUE;
+        double max2 = -Double.MAX_VALUE;
+        for (double v : buffer2) {
+            double adjusted = v - dcOffset2;
+            if (adjusted < min2) min2 = adjusted;
+            if (adjusted > max2) max2 = adjusted;
+        }
+        if (min2 != Double.MAX_VALUE && max2 != -Double.MAX_VALUE) {
+            double vpp2 = max2 - min2;
+            voltageLabel2.setText(String.format("CH2: %.3f Vpp", vpp2));
         }
 
         // Redraw waveform
@@ -651,7 +717,7 @@ public class SignalAnalyzerApp extends Application {
         double pixelsPerSample = w / displaySamples;
         double xOffset = triggerEnabled ? -triggerFraction * pixelsPerSample : 0;
 
-        // Draw waveform
+        // Draw channel 1 waveform (green)
         gc.setStroke(Color.web("#00ff88"));
         gc.setLineWidth(2);
 
@@ -661,12 +727,9 @@ public class SignalAnalyzerApp extends Application {
         for (int i = 0; i < displaySamples; i++) {
             int idx = startOffset + i;
             double x = (double) i / displaySamples * w + xOffset;
-            // Apply AC coupling (subtract DC offset)
             double voltage = buffer[idx] - dcOffset;
-            // Scale voltage to screen coordinates
             double normalizedV = (voltage - scaleMin) / range;
             double y = h - (normalizedV * h);
-            // Clamp to canvas bounds
             y = Math.max(0, Math.min(h, y));
 
             if (first) {
@@ -674,6 +737,31 @@ public class SignalAnalyzerApp extends Application {
                 first = false;
             } else {
                 gc.lineTo(x, y);
+            }
+        }
+        gc.stroke();
+
+        // Draw channel 2 waveform (cyan) — same Y scale
+        gc.setStroke(Color.web("#00aaff"));
+        gc.setLineWidth(2);
+
+        gc.beginPath();
+        first = true;
+
+        for (int i = 0; i < displaySamples; i++) {
+            int idx = startOffset + i;
+            if (idx >= buffer2.length) break;
+            double x = (double) i / displaySamples * w + xOffset;
+            double voltage2 = buffer2[idx] - dcOffset2;
+            double normalizedV2 = (voltage2 - scaleMin) / range;
+            double y2 = h - (normalizedV2 * h);
+            y2 = Math.max(0, Math.min(h, y2));
+
+            if (first) {
+                gc.moveTo(x, y2);
+                first = false;
+            } else {
+                gc.lineTo(x, y2);
             }
         }
         gc.stroke();
@@ -737,15 +825,23 @@ public class SignalAnalyzerApp extends Application {
     private void updateDcOffset() {
         if (!acCoupling) {
             dcOffset = 0.0;
+            dcOffset2 = 0.0;
             return;
         }
-        // Calculate average (DC component) of valid buffer samples
+        // Calculate average (DC component) of valid buffer samples — independently per channel
         int validSamples = (intervalMode && bufferIndex > 0 && bufferIndex < BUFFER_SIZE) ? bufferIndex : BUFFER_SIZE;
         double sum = 0;
         for (int i = 0; i < validSamples; i++) {
             sum += buffer[i];
         }
         dcOffset = sum / validSamples;
+
+        int validSamples2 = (intervalMode && bufferIndex2 > 0 && bufferIndex2 < BUFFER_SIZE) ? bufferIndex2 : BUFFER_SIZE;
+        double sum2 = 0;
+        for (int i = 0; i < validSamples2; i++) {
+            sum2 += buffer2[i];
+        }
+        dcOffset2 = sum2 / validSamples2;
     }
 
     private int findTriggerPoint() {
@@ -782,7 +878,6 @@ public class SignalAnalyzerApp extends Application {
     private void updateAutoScale() {
         if (!autoScale) {
             if (acCoupling) {
-                // Default symmetric scale for AC coupling
                 scaleMin = -1.65;
                 scaleMax = 1.65;
             } else {
@@ -795,6 +890,7 @@ public class SignalAnalyzerApp extends Application {
         double min = Double.MAX_VALUE;
         double max = Double.MIN_VALUE;
 
+        // Use min/max from BOTH channels so they share the same Y axis
         int validSamples = (intervalMode && bufferIndex > 0 && bufferIndex < BUFFER_SIZE) ? bufferIndex : BUFFER_SIZE;
         for (int i = 0; i < validSamples; i++) {
             double adjusted = buffer[i] - dcOffset;
@@ -802,13 +898,18 @@ public class SignalAnalyzerApp extends Application {
             if (adjusted > max) max = adjusted;
         }
 
+        int validSamples2 = (intervalMode && bufferIndex2 > 0 && bufferIndex2 < BUFFER_SIZE) ? bufferIndex2 : BUFFER_SIZE;
+        for (int i = 0; i < validSamples2; i++) {
+            double adjusted2 = buffer2[i] - dcOffset2;
+            if (adjusted2 < min) min = adjusted2;
+            if (adjusted2 > max) max = adjusted2;
+        }
+
         if (min != Double.MAX_VALUE && max != Double.MIN_VALUE && max > min) {
-            // Add 10% margin
             double range = max - min;
             double margin = range * 0.1;
 
             if (acCoupling) {
-                // Make scale symmetric around 0
                 double maxAbs = Math.max(Math.abs(min - margin), Math.abs(max + margin));
                 scaleMin = -maxAbs;
                 scaleMax = maxAbs;
@@ -869,7 +970,9 @@ public class SignalAnalyzerApp extends Application {
 
     private void clearBuffer() {
         Arrays.fill(buffer, 0);
+        Arrays.fill(buffer2, 0);
         bufferIndex = 0;
+        bufferIndex2 = 0;
         drawGrid();
     }
 
