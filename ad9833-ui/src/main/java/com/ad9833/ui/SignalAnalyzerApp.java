@@ -43,6 +43,7 @@ public class SignalAnalyzerApp extends Application {
     private boolean isRunning = false;
     private int selectedChannel = 1;  // Default to CH1 (CH0 may have connection issues)
     private int selectedChannel2 = 2; // Default to CH2
+    private boolean dualChannel = true; // false when CH2 is OFF
 
     // Waveform buffer
     private static final int BUFFER_SIZE = 400;
@@ -193,6 +194,7 @@ public class SignalAnalyzerApp extends Application {
         ch2Label.setFont(Font.font("System", FontWeight.BOLD, 12));
 
         channelSelect2 = new ComboBox<>();
+        channelSelect2.getItems().add("OFF");
         for (int i = 0; i < 8; i++) {
             channelSelect2.getItems().add("CH" + i);
         }
@@ -201,9 +203,14 @@ public class SignalAnalyzerApp extends Application {
         channelSelect2.setPrefWidth(70);
         channelSelect2.setOnAction(e -> {
             String selected = channelSelect2.getValue();
-            selectedChannel2 = Integer.parseInt(selected.substring(2));
-            if (controller != null) {
-                controller.setSamplerChannels(selectedChannel, selectedChannel2);
+            if ("OFF".equals(selected)) {
+                dualChannel = false;
+            } else {
+                dualChannel = true;
+                selectedChannel2 = Integer.parseInt(selected.substring(2));
+                if (controller != null) {
+                    controller.setSamplerChannels(selectedChannel, selectedChannel2);
+                }
             }
             clearBuffer();
         });
@@ -381,7 +388,11 @@ public class SignalAnalyzerApp extends Application {
     }
 
     private void startContinuousSampling() {
-        controller.startDualContinuousSampling(selectedChannel, selectedChannel2, samplesPerFrame);
+        if (dualChannel) {
+            controller.startDualContinuousSampling(selectedChannel, selectedChannel2, samplesPerFrame);
+        } else {
+            controller.startContinuousSampling(selectedChannel, samplesPerFrame);
+        }
 
         timer = new AnimationTimer() {
             private long lastUpdate = 0;
@@ -391,13 +402,19 @@ public class SignalAnalyzerApp extends Application {
                 // Update at ~30Hz
                 if (now - lastUpdate >= 33_000_000) {  // ~30fps
                     lastUpdate = now;
-                    int[] samplesX = controller.getLatestSamplesX();
-                    int[] samplesY = controller.getLatestSamplesY();
-                    if (samplesX == null || samplesX.length == 0 || samplesX == lastProcessedSamples) return;
-                    lastProcessedSamples = samplesX;
-
-                    int[] samplesY2 = (samplesY != null && samplesY.length == samplesX.length) ? samplesY : new int[samplesX.length];
-                    processAndDisplaySamples(samplesX, samplesY2);
+                    if (dualChannel) {
+                        int[] samplesX = controller.getLatestSamplesX();
+                        int[] samplesY = controller.getLatestSamplesY();
+                        if (samplesX == null || samplesX.length == 0 || samplesX == lastProcessedSamples) return;
+                        lastProcessedSamples = samplesX;
+                        int[] samplesY2 = (samplesY != null && samplesY.length == samplesX.length) ? samplesY : new int[samplesX.length];
+                        processAndDisplaySamples(samplesX, samplesY2);
+                    } else {
+                        int[] samples = controller.getLatestSamples();
+                        if (samples == null || samples.length == 0 || samples == lastProcessedSamples) return;
+                        lastProcessedSamples = samples;
+                        processAndDisplaySamples(samples, null);
+                    }
                 }
             }
         };
@@ -409,9 +426,16 @@ public class SignalAnalyzerApp extends Application {
         intervalThread = new Thread(() -> {
             while (isRunning) {
                 try {
-                    int[][] xy = controller.sampleFastDualChannel(selectedChannel, selectedChannel2, INTERVAL_SAMPLES);
-                    int[] samplesX = xy[0];
-                    int[] samplesY = xy[1];
+                    int[] samplesX;
+                    int[] samplesY;
+                    if (dualChannel) {
+                        int[][] xy = controller.sampleFastDualChannel(selectedChannel, selectedChannel2, INTERVAL_SAMPLES);
+                        samplesX = xy[0];
+                        samplesY = xy[1];
+                    } else {
+                        samplesX = controller.sampleFast(selectedChannel, INTERVAL_SAMPLES);
+                        samplesY = null;
+                    }
 
                     if (samplesX.length > 0) {
                         Platform.runLater(() -> processAndDisplaySamples(samplesX, samplesY));
@@ -451,16 +475,20 @@ public class SignalAnalyzerApp extends Application {
      * Uses channel 1 for trigger/cycle detection; applies same offset to both channels.
      */
     private void processAndDisplaySamples(int[] samples, int[] samples2) {
+        boolean hasCh2 = dualChannel && samples2 != null && samples2.length > 0;
+
         // Convert all raw samples to voltages
         double[] voltages = new double[samples.length];
-        double[] voltages2 = new double[samples2.length];
+        double[] voltages2 = hasCh2 ? new double[samples2.length] : null;
         double sum = 0;
         for (int i = 0; i < samples.length; i++) {
             voltages[i] = (samples[i] * 3.3) / 4095.0;
             sum += voltages[i];
         }
-        for (int i = 0; i < samples2.length; i++) {
-            voltages2[i] = (samples2[i] * 3.3) / 4095.0;
+        if (hasCh2) {
+            for (int i = 0; i < samples2.length; i++) {
+                voltages2[i] = (samples2[i] * 3.3) / 4095.0;
+            }
         }
 
         // Pre-compute DC offset (from channel 1 for trigger detection)
@@ -478,16 +506,18 @@ public class SignalAnalyzerApp extends Application {
                 int count = Math.min(BUFFER_SIZE, cycleLen);
                 for (int i = 0; i < count; i++) {
                     buffer[i] = voltages[bounds[0] + i];
-                    if (bounds[0] + i < voltages2.length) {
+                    if (hasCh2 && bounds[0] + i < voltages2.length) {
                         buffer2[i] = voltages2[bounds[0] + i];
                     }
                 }
                 for (int i = count; i < BUFFER_SIZE; i++) {
                     buffer[i] = voltages[bounds[0]];
-                    buffer2[i] = (bounds[0] < voltages2.length) ? voltages2[bounds[0]] : 0;
+                    if (hasCh2) {
+                        buffer2[i] = (bounds[0] < voltages2.length) ? voltages2[bounds[0]] : 0;
+                    }
                 }
                 bufferIndex = count;
-                bufferIndex2 = count;
+                bufferIndex2 = hasCh2 ? count : 0;
                 double duration = controller.getLastSampleDurationSeconds();
                 if (duration > 0) {
                     double sampleRate = samples.length / duration;
@@ -518,17 +548,20 @@ public class SignalAnalyzerApp extends Application {
             }
         }
 
-        // Fill both display buffers starting from trigger point
+        // Fill display buffers starting from trigger point
         int count = Math.min(BUFFER_SIZE, voltages.length - trigStart);
-        int count2 = Math.min(BUFFER_SIZE, voltages2.length - trigStart);
         for (int i = 0; i < count; i++) {
             buffer[i] = voltages[trigStart + i];
         }
-        for (int i = 0; i < count2; i++) {
-            buffer2[i] = voltages2[trigStart + i];
-        }
         bufferIndex = count % BUFFER_SIZE;
-        bufferIndex2 = count2 % BUFFER_SIZE;
+
+        if (hasCh2) {
+            int count2 = Math.min(BUFFER_SIZE, voltages2.length - trigStart);
+            for (int i = 0; i < count2; i++) {
+                buffer2[i] = voltages2[trigStart + i];
+            }
+            bufferIndex2 = count2 % BUFFER_SIZE;
+        }
 
         // Update display
         updateDisplay();
@@ -622,17 +655,22 @@ public class SignalAnalyzerApp extends Application {
             voltageLabel.setText(String.format("CH1: %.3f Vpp", vpp));
         }
 
-        // Compute Vpp from buffer 2
-        double min2 = Double.MAX_VALUE;
-        double max2 = -Double.MAX_VALUE;
-        for (double v : buffer2) {
-            double adjusted = v - dcOffset2;
-            if (adjusted < min2) min2 = adjusted;
-            if (adjusted > max2) max2 = adjusted;
-        }
-        if (min2 != Double.MAX_VALUE && max2 != -Double.MAX_VALUE) {
-            double vpp2 = max2 - min2;
-            voltageLabel2.setText(String.format("CH2: %.3f Vpp", vpp2));
+        // Compute Vpp from buffer 2 (only if dual channel)
+        if (dualChannel) {
+            double min2 = Double.MAX_VALUE;
+            double max2 = -Double.MAX_VALUE;
+            for (double v : buffer2) {
+                double adjusted = v - dcOffset2;
+                if (adjusted < min2) min2 = adjusted;
+                if (adjusted > max2) max2 = adjusted;
+            }
+            if (min2 != Double.MAX_VALUE && max2 != -Double.MAX_VALUE) {
+                double vpp2 = max2 - min2;
+                voltageLabel2.setText(String.format("CH2: %.3f Vpp", vpp2));
+            }
+            voltageLabel2.setVisible(true);
+        } else {
+            voltageLabel2.setVisible(false);
         }
 
         // Redraw waveform
@@ -749,30 +787,32 @@ public class SignalAnalyzerApp extends Application {
         }
         gc.stroke();
 
-        // Draw channel 2 waveform (cyan) — same Y scale
-        gc.setStroke(Color.web("#00aaff"));
-        gc.setLineWidth(2);
+        // Draw channel 2 waveform (cyan) — same Y scale, only if dual channel
+        if (dualChannel) {
+            gc.setStroke(Color.web("#00aaff"));
+            gc.setLineWidth(2);
 
-        gc.beginPath();
-        first = true;
+            gc.beginPath();
+            first = true;
 
-        for (int i = 0; i < displaySamples; i++) {
-            int idx = startOffset + i;
-            if (idx >= buffer2.length) break;
-            double x = (double) i / displaySamples * w + xOffset;
-            double voltage2 = buffer2[idx] - dcOffset2;
-            double normalizedV2 = (voltage2 - scaleMin) / range;
-            double y2 = h - (normalizedV2 * h);
-            y2 = Math.max(0, Math.min(h, y2));
+            for (int i = 0; i < displaySamples; i++) {
+                int idx = startOffset + i;
+                if (idx >= buffer2.length) break;
+                double x = (double) i / displaySamples * w + xOffset;
+                double voltage2 = buffer2[idx] - dcOffset2;
+                double normalizedV2 = (voltage2 - scaleMin) / range;
+                double y2 = h - (normalizedV2 * h);
+                y2 = Math.max(0, Math.min(h, y2));
 
-            if (first) {
-                gc.moveTo(x, y2);
-                first = false;
-            } else {
-                gc.lineTo(x, y2);
+                if (first) {
+                    gc.moveTo(x, y2);
+                    first = false;
+                } else {
+                    gc.lineTo(x, y2);
+                }
             }
+            gc.stroke();
         }
-        gc.stroke();
     }
 
     private void updateStats() {
@@ -844,12 +884,16 @@ public class SignalAnalyzerApp extends Application {
         }
         dcOffset = sum / validSamples;
 
-        int validSamples2 = (intervalMode && bufferIndex2 > 0 && bufferIndex2 < BUFFER_SIZE) ? bufferIndex2 : BUFFER_SIZE;
-        double sum2 = 0;
-        for (int i = 0; i < validSamples2; i++) {
-            sum2 += buffer2[i];
+        if (dualChannel) {
+            int validSamples2 = (intervalMode && bufferIndex2 > 0 && bufferIndex2 < BUFFER_SIZE) ? bufferIndex2 : BUFFER_SIZE;
+            double sum2 = 0;
+            for (int i = 0; i < validSamples2; i++) {
+                sum2 += buffer2[i];
+            }
+            dcOffset2 = sum2 / validSamples2;
+        } else {
+            dcOffset2 = 0.0;
         }
-        dcOffset2 = sum2 / validSamples2;
     }
 
     private int findTriggerPoint() {
@@ -906,11 +950,13 @@ public class SignalAnalyzerApp extends Application {
             if (adjusted > max) max = adjusted;
         }
 
-        int validSamples2 = (intervalMode && bufferIndex2 > 0 && bufferIndex2 < BUFFER_SIZE) ? bufferIndex2 : BUFFER_SIZE;
-        for (int i = 0; i < validSamples2; i++) {
-            double adjusted2 = buffer2[i] - dcOffset2;
-            if (adjusted2 < min) min = adjusted2;
-            if (adjusted2 > max) max = adjusted2;
+        if (dualChannel) {
+            int validSamples2 = (intervalMode && bufferIndex2 > 0 && bufferIndex2 < BUFFER_SIZE) ? bufferIndex2 : BUFFER_SIZE;
+            for (int i = 0; i < validSamples2; i++) {
+                double adjusted2 = buffer2[i] - dcOffset2;
+                if (adjusted2 < min) min = adjusted2;
+                if (adjusted2 > max) max = adjusted2;
+            }
         }
 
         if (min != Double.MAX_VALUE && max != Double.MIN_VALUE && max > min) {
