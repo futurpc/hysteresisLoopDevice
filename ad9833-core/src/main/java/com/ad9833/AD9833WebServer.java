@@ -32,6 +32,8 @@ public class AD9833WebServer {
     private int analyzerChannel = 1;
     private int analyzerChannel2 = -1; // -1 = OFF
     private int analyzerSamplesPerFrame = 1000;
+    private volatile int[] lastRawCh1;
+    private volatile int[] lastRawCh2;
 
     public AD9833WebServer(int port) throws Exception {
         this(port, null);
@@ -67,6 +69,8 @@ public class AD9833WebServer {
         server.createContext("/api/analyzer/stream", new AnalyzerStreamHandler());
         server.createContext("/api/analyzer/start", new AnalyzerStartHandler());
         server.createContext("/api/analyzer/stop", new AnalyzerStopHandler());
+        server.createContext("/api/analyzer/sample", new AnalyzerIntervalHandler());
+        server.createContext("/api/analyzer/csv", new AnalyzerCsvHandler());
 
         server.setExecutor(Executors.newCachedThreadPool());
     }
@@ -244,6 +248,8 @@ public class AD9833WebServer {
                         } else {
                             raw = adcController.getLatestSamples();
                         }
+                        lastRawCh1 = raw;
+                        lastRawCh2 = raw2;
                         if (raw == null || raw.length == 0 || raw == lastSent) {
                             Thread.sleep(33);
                             continue;
@@ -283,6 +289,90 @@ public class AD9833WebServer {
                 }
             } catch (IOException ignored) {
                 // Client disconnected
+            }
+        }
+    }
+
+    private class AnalyzerIntervalHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (adcController == null) {
+                sendJson(exchange, "{\"error\":\"ADC not available\"}");
+                return;
+            }
+            try {
+                String query = exchange.getRequestURI().getQuery();
+                Map<String, String> params = parseQuery(query);
+                int ch1 = params.containsKey("channel") ? Integer.parseInt(params.get("channel")) : analyzerChannel;
+                int ch2 = -1;
+                if (params.containsKey("channel2")) {
+                    String c2 = params.get("channel2");
+                    ch2 = "off".equalsIgnoreCase(c2) ? -1 : Integer.parseInt(c2);
+                }
+                int samples = params.containsKey("samples") ? Integer.parseInt(params.get("samples")) : 2000;
+
+                StringBuilder sb = new StringBuilder("data: {\"v\":[");
+                if (ch2 >= 0) {
+                    int[][] xy = adcController.sampleFastDualChannel(ch1, ch2, samples);
+                    lastRawCh1 = xy[0];
+                    lastRawCh2 = xy[1];
+                    for (int i = 0; i < xy[0].length; i++) {
+                        if (i > 0) sb.append(',');
+                        sb.append(String.format("%.4f", (xy[0][i] * 3.3) / 4095.0));
+                    }
+                    sb.append("],\"v2\":[");
+                    for (int i = 0; i < xy[1].length; i++) {
+                        if (i > 0) sb.append(',');
+                        sb.append(String.format("%.4f", (xy[1][i] * 3.3) / 4095.0));
+                    }
+                    sb.append("]");
+                } else {
+                    int[] raw = adcController.sampleFast(ch1, samples);
+                    lastRawCh1 = raw;
+                    lastRawCh2 = null;
+                    for (int i = 0; i < raw.length; i++) {
+                        if (i > 0) sb.append(',');
+                        sb.append(String.format("%.4f", (raw[i] * 3.3) / 4095.0));
+                    }
+                    sb.append("]");
+                }
+                double duration = adcController.getLastSampleDurationSeconds();
+                sb.append(",\"dt\":").append((long)(duration * 1_000_000));
+                sb.append("}");
+                sendJson(exchange, sb.toString());
+            } catch (Exception e) {
+                sendJson(exchange, "{\"error\":\"" + e.getMessage() + "\"}");
+            }
+        }
+    }
+
+    private class AnalyzerCsvHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            int[] raw1 = lastRawCh1;
+            int[] raw2 = lastRawCh2;
+            if (raw1 == null || raw1.length == 0) {
+                sendJson(exchange, "{\"error\":\"No data\"}");
+                return;
+            }
+            StringBuilder sb = new StringBuilder();
+            boolean hasCh2 = raw2 != null && raw2.length > 0;
+            sb.append(hasCh2 ? "index,ch1_raw,ch1_voltage,ch2_raw,ch2_voltage\n" : "index,ch1_raw,ch1_voltage\n");
+            for (int i = 0; i < raw1.length; i++) {
+                double v1 = (raw1[i] * 3.3) / 4095.0;
+                if (hasCh2 && i < raw2.length) {
+                    double v2 = (raw2[i] * 3.3) / 4095.0;
+                    sb.append(String.format("%d,%d,%.4f,%d,%.4f\n", i, raw1[i], v1, raw2[i], v2));
+                } else {
+                    sb.append(String.format("%d,%d,%.4f\n", i, raw1[i], v1));
+                }
+            }
+            exchange.getResponseHeaders().set("Content-Type", "text/csv");
+            exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=signal_data.csv");
+            byte[] bytes = sb.toString().getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(bytes);
             }
         }
     }
@@ -335,26 +425,29 @@ public class AD9833WebServer {
             color: white;
             padding: 8px;
         }
-        .columns { display: flex; gap: 10px; max-width: 900px; margin: 0 auto; }
+        .columns { display: flex; gap: 12px; max-width: 1400px; margin: 0 auto; }
         .col-scope { flex: 3; min-width: 0; }
-        .col-gen { flex: 2; min-width: 200px; }
-        h2 { text-align: center; color: #00aaff; font-size: 15px; margin-bottom: 5px; }
+        .col-gen { flex: 1.5; min-width: 240px; }
+        h2 { text-align: center; color: #00aaff; font-size: 18px; margin-bottom: 6px; }
 
         /* ---- Analyzer ---- */
         .scope-header { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 4px; flex-wrap: wrap; }
-        .voltage-display { font-family: 'Courier New', monospace; font-size: 22px; color: #00ff88; text-shadow: 0 0 10px rgba(0,255,136,0.5); }
-        .measured-freq { font-family: 'Courier New', monospace; font-size: 16px; color: #ffcc00; }
+        .voltage-display { font-family: 'Courier New', monospace; font-size: 26px; color: #00ff88; text-shadow: 0 0 10px rgba(0,255,136,0.5); }
+        .measured-freq { font-family: 'Courier New', monospace; font-size: 20px; color: #ffcc00; }
         .canvas-wrap { background: #0a0a15; border: 2px solid #333355; border-radius: 8px; overflow: hidden; margin-bottom: 5px; }
         canvas { display: block; width: 100%; }
         .scope-controls { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; justify-content: center; margin-bottom: 5px; }
-        .scope-btn { padding: 7px 14px; border: none; border-radius: 7px; font-size: 13px; font-weight: bold; cursor: pointer; }
+        .scope-btn { padding: 10px 18px; border: none; border-radius: 7px; font-size: 15px; font-weight: bold; cursor: pointer; }
         .scope-btn:active { transform: scale(0.97); }
         .scope-start { background: linear-gradient(135deg, #4CAF50, #45a049); color: white; }
         .scope-stop { background: linear-gradient(135deg, #f44336, #d32f2f); color: white; }
-        .toggle-btn { padding: 4px 8px; border: 2px solid #333; border-radius: 6px; background: transparent; color: #888; font-size: 11px; font-weight: bold; cursor: pointer; }
+        .toggle-btn { padding: 6px 12px; border: 2px solid #333; border-radius: 6px; background: transparent; color: #888; font-size: 13px; font-weight: bold; cursor: pointer; }
         .toggle-btn.active { border-color: #ff9800; color: #ff9800; background: rgba(255,152,0,0.15); }
         .toggle-btn.active-ac { border-color: #9c27b0; color: #9c27b0; background: rgba(156,39,176,0.15); }
-        select { background: #333; color: white; border: 1px solid #555; border-radius: 6px; padding: 3px 6px; font-size: 12px; }
+        select { background: #333; color: white; border: 1px solid #555; border-radius: 6px; padding: 5px 8px; font-size: 14px; }
+        .interval-btn { padding: 8px 14px; border: 2px solid #444; border-radius: 6px; background: transparent; color: #ccc; font-size: 14px; font-weight: bold; cursor: pointer; }
+        .interval-btn.active { border-color: #ff9800; color: #ff9800; background: rgba(255,152,0,0.15); }
+        .csv-btn { padding: 8px 16px; border: none; border-radius: 7px; font-size: 14px; font-weight: bold; cursor: pointer; background: linear-gradient(135deg, #2196F3, #1976D2); color: white; }
         .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 3px; }
         .status-dot.running { background: #4CAF50; box-shadow: 0 0 8px #4CAF50; }
         .status-dot.stopped { background: #f44336; }
@@ -399,11 +492,13 @@ public class AD9833WebServer {
             <span class="measured-freq" id="measuredFreq">-- Hz</span>
         </div>
         <div class="canvas-wrap">
-            <canvas id="scope" width="560" height="260"></canvas>
+            <canvas id="scope" width="800" height="360"></canvas>
         </div>
         <div class="scope-controls">
-            <button class="scope-btn scope-start" onclick="startAnalyzer()">START</button>
-            <button class="scope-btn scope-stop" onclick="stopAnalyzer()">STOP</button>
+            <button class="scope-btn scope-start" onclick="startScope()">START</button>
+            <button class="scope-btn scope-stop" onclick="stopScope()">STOP</button>
+            <button class="toggle-btn active" id="contBtn" onclick="setMode('cont')">CONT</button>
+            <button class="toggle-btn" id="intBtn" onclick="setMode('interval')">INTRVL</button>
             <span style="color:#00ff88;font-size:12px;font-weight:bold">1:</span>
             <select id="channelSel" onchange="scopeUpdateSettings()" style="width:60px">
                 <option value="0">CH0</option>
@@ -433,6 +528,18 @@ public class AD9833WebServer {
                 <span id="minStat">Min: --</span>
                 <span id="maxStat">Max: --</span>
             </div>
+        </div>
+        <div class="scope-controls" id="intervalRow" style="display:none">
+            <span style="color:#ccc;font-size:13px;font-weight:bold">Interval:</span>
+            <button class="interval-btn active" onclick="setInterval2(1)">1s</button>
+            <button class="interval-btn" onclick="setInterval2(5)">5s</button>
+            <button class="interval-btn" onclick="setInterval2(10)">10s</button>
+            <button class="interval-btn" onclick="setInterval2(20)">20s</button>
+            <button class="interval-btn" onclick="togglePause()" id="pauseBtn">PAUSE</button>
+            <span style="color:#888;font-size:12px">Smp:</span>
+            <input type="range" id="intSamplesSlider" min="500" max="5000" value="2000" style="width:100px" oninput="intSmpVal.textContent=this.value">
+            <span class="val" id="intSmpVal" style="color:#00aaff;font-family:monospace;font-size:13px">2000</span>
+            <button class="csv-btn" onclick="downloadCsv()">CSV</button>
         </div>
     </div>
 
@@ -486,6 +593,10 @@ public class AD9833WebServer {
     let eventSource = null;
     let scopeRunning = false;
     let dualChannel = true;
+    let scopeMode = 'cont'; // 'cont' or 'interval'
+    let intervalSec = 1;
+    let intervalPaused = false;
+    let intervalTimer = null;
 
     let autoScale = true, acCoupling = true, triggerEnabled = true;
     let triggerLevel = 0.1;
@@ -526,38 +637,7 @@ public class AD9833WebServer {
         eventSource.onmessage = function(e) {
             let data = JSON.parse(e.data);
             if (data.error) { stopAnalyzer(); return; }
-            let voltages = data.v;
-            let voltages2 = data.v2 || null;
-
-            let sum = 0;
-            for (let i = 0; i < voltages.length; i++) sum += voltages[i];
-            let tempDc = acCoupling ? sum / voltages.length : 0;
-
-            let trigStart = 0;
-            trigFrac = 0;
-            if (triggerEnabled && voltages.length > BUFFER_SIZE) {
-                let searchEnd = voltages.length - BUFFER_SIZE;
-                for (let i = 1; i < searchEnd; i++) {
-                    let prev = voltages[i-1] - tempDc;
-                    let curr = voltages[i] - tempDc;
-                    if (prev < triggerLevel && curr >= triggerLevel) {
-                        trigStart = i - 1;
-                        let denom = curr - prev;
-                        trigFrac = denom !== 0 ? (triggerLevel - prev) / denom : 0;
-                        break;
-                    }
-                }
-            }
-
-            let count = Math.min(BUFFER_SIZE, voltages.length - trigStart);
-            for (let i = 0; i < count; i++) buffer[i] = voltages[trigStart + i];
-            bufferIndex = count % BUFFER_SIZE;
-
-            if (dualChannel && voltages2) {
-                let count2 = Math.min(BUFFER_SIZE, voltages2.length - trigStart);
-                for (let i = 0; i < count2; i++) buffer2[i] = voltages2[trigStart + i];
-            }
-
+            processFrame(data);
             if (data.freq && data.freq > 0) {
                 smoothedFreq = smoothedFreq === 0 ? data.freq : smoothedFreq * 0.7 + data.freq * 0.3;
                 document.getElementById('measuredFreq').textContent = formatFreqHz(smoothedFreq);
@@ -694,6 +774,111 @@ public class AD9833WebServer {
         if (dualChannel && minV2 !== Infinity && maxV2 !== -Infinity) {
             document.getElementById('voltageDisplay2').textContent = 'CH2: ' + (maxV2-minV2).toFixed(3) + ' Vpp';
         }
+    }
+
+    // ===== MODE / INTERVAL / CSV =====
+    function setMode(m) {
+        scopeMode = m;
+        document.getElementById('contBtn').className = m==='cont' ? 'toggle-btn active' : 'toggle-btn';
+        document.getElementById('intBtn').className = m==='interval' ? 'toggle-btn active' : 'toggle-btn';
+        document.getElementById('intervalRow').style.display = m==='interval' ? 'flex' : 'none';
+    }
+
+    function startScope() {
+        if (scopeMode === 'cont') startAnalyzer();
+        else startIntervalMode();
+    }
+    function stopScope() {
+        if (scopeMode === 'cont') stopAnalyzer();
+        else stopIntervalMode();
+    }
+
+    function startIntervalMode() {
+        if (scopeRunning) return;
+        scopeRunning = true; intervalPaused = false;
+        document.getElementById('scopeDot').className = 'status-dot running';
+        document.getElementById('scopeStatus').textContent = 'Interval';
+        doIntervalSample();
+        intervalTimer = setInterval(() => { if (!intervalPaused) doIntervalSample(); }, intervalSec * 1000);
+    }
+
+    function stopIntervalMode() {
+        scopeRunning = false;
+        if (intervalTimer) { clearInterval(intervalTimer); intervalTimer = null; }
+        document.getElementById('scopeDot').className = 'status-dot stopped';
+        document.getElementById('scopeStatus').textContent = 'Stopped';
+    }
+
+    async function doIntervalSample() {
+        let ch = document.getElementById('channelSel').value;
+        let ch2 = document.getElementById('channelSel2').value;
+        dualChannel = ch2 !== 'off';
+        document.getElementById('voltageDisplay2').style.display = dualChannel ? '' : 'none';
+        let smp = document.getElementById('intSamplesSlider').value;
+        try {
+            let resp = await fetch('/api/analyzer/sample?channel=' + ch + '&channel2=' + ch2 + '&samples=' + smp);
+            let text = await resp.text();
+            // Strip "data: " prefix if present
+            let json = text.startsWith('data: ') ? text.substring(6) : text;
+            let data = JSON.parse(json);
+            if (data.error) return;
+            processFrame(data);
+            drawWaveform();
+        } catch(e) {}
+    }
+
+    function processFrame(data) {
+        let voltages = data.v;
+        let voltages2 = data.v2 || null;
+        let sum = 0;
+        for (let i = 0; i < voltages.length; i++) sum += voltages[i];
+        let tempDc = acCoupling ? sum / voltages.length : 0;
+
+        let trigStart = 0;
+        trigFrac = 0;
+        if (triggerEnabled && voltages.length > BUFFER_SIZE) {
+            let searchEnd = voltages.length - BUFFER_SIZE;
+            for (let i = 1; i < searchEnd; i++) {
+                let prev = voltages[i-1] - tempDc;
+                let curr = voltages[i] - tempDc;
+                if (prev < triggerLevel && curr >= triggerLevel) {
+                    trigStart = i - 1;
+                    let denom = curr - prev;
+                    trigFrac = denom !== 0 ? (triggerLevel - prev) / denom : 0;
+                    break;
+                }
+            }
+        }
+
+        let count = Math.min(BUFFER_SIZE, voltages.length - trigStart);
+        for (let i = 0; i < count; i++) buffer[i] = voltages[trigStart + i];
+        bufferIndex = count % BUFFER_SIZE;
+
+        if (dualChannel && voltages2) {
+            let count2 = Math.min(BUFFER_SIZE, voltages2.length - trigStart);
+            for (let i = 0; i < count2; i++) buffer2[i] = voltages2[trigStart + i];
+        }
+    }
+
+    function setInterval2(s) {
+        intervalSec = s; intervalPaused = false;
+        document.querySelectorAll('.interval-btn').forEach(b => b.className = 'interval-btn');
+        event.target.className = 'interval-btn active';
+        document.getElementById('pauseBtn').className = 'interval-btn';
+        if (scopeRunning && intervalTimer) {
+            clearInterval(intervalTimer);
+            intervalTimer = setInterval(() => { if (!intervalPaused) doIntervalSample(); }, intervalSec * 1000);
+        }
+    }
+
+    function togglePause() {
+        intervalPaused = !intervalPaused;
+        document.getElementById('pauseBtn').className = intervalPaused ? 'interval-btn active' : 'interval-btn';
+        document.getElementById('scopeStatus').textContent = intervalPaused ? 'Paused' : 'Interval';
+    }
+
+    function downloadCsv() {
+        window.open('/api/analyzer/csv', '_blank');
     }
 
     // ===== GENERATOR =====
