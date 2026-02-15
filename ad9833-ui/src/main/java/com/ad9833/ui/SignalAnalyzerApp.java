@@ -638,8 +638,14 @@ public class SignalAnalyzerApp extends Application {
         // Buffer is pre-aligned to trigger in AnimationTimer — no re-search needed
         int startOffset = 0;
 
-        // Calculate how many samples to display based on zoom
-        int displaySamples = (BUFFER_SIZE * zoomPercent) / 100;
+        // Calculate how many samples to display
+        // In interval mode, use only the valid cycle samples (stored in bufferIndex)
+        int displaySamples;
+        if (intervalMode && bufferIndex > 0 && bufferIndex < BUFFER_SIZE) {
+            displaySamples = bufferIndex;
+        } else {
+            displaySamples = (BUFFER_SIZE * zoomPercent) / 100;
+        }
 
         // Sub-sample X offset from trigger interpolation (computed during pre-alignment)
         double pixelsPerSample = w / displaySamples;
@@ -733,12 +739,13 @@ public class SignalAnalyzerApp extends Application {
             dcOffset = 0.0;
             return;
         }
-        // Calculate average (DC component) of buffer
+        // Calculate average (DC component) of valid buffer samples
+        int validSamples = (intervalMode && bufferIndex > 0 && bufferIndex < BUFFER_SIZE) ? bufferIndex : BUFFER_SIZE;
         double sum = 0;
-        for (double v : buffer) {
-            sum += v;
+        for (int i = 0; i < validSamples; i++) {
+            sum += buffer[i];
         }
-        dcOffset = sum / BUFFER_SIZE;
+        dcOffset = sum / validSamples;
     }
 
     private int findTriggerPoint() {
@@ -788,8 +795,9 @@ public class SignalAnalyzerApp extends Application {
         double min = Double.MAX_VALUE;
         double max = Double.MIN_VALUE;
 
-        for (double v : buffer) {
-            double adjusted = v - dcOffset;  // Apply AC coupling offset
+        int validSamples = (intervalMode && bufferIndex > 0 && bufferIndex < BUFFER_SIZE) ? bufferIndex : BUFFER_SIZE;
+        for (int i = 0; i < validSamples; i++) {
+            double adjusted = buffer[i] - dcOffset;
             if (adjusted < min) min = adjusted;
             if (adjusted > max) max = adjusted;
         }
