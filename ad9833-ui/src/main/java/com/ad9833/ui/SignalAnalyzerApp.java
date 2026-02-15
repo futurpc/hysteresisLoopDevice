@@ -150,21 +150,21 @@ public class SignalAnalyzerApp extends Application {
         StackPane canvasContainer = new StackPane(waveformCanvas);
         canvasContainer.setStyle("-fx-border-color: #333355; -fx-border-width: 2; -fx-background-color: #0a0a15;");
 
-        // Controls row
-        HBox controlsRow = new HBox(20);
+        // Controls row 1: channel, start/stop, mode
+        HBox controlsRow = new HBox(8);
         controlsRow.setAlignment(Pos.CENTER);
 
-        // Channel selector
-        Label chLabel = new Label("Channel:");
+        Label chLabel = new Label("CH:");
         chLabel.setTextFill(Color.WHITE);
-        chLabel.setFont(Font.font("System", 14));
+        chLabel.setFont(Font.font("System", FontWeight.BOLD, 14));
 
         channelSelect = new ComboBox<>();
         for (int i = 0; i < 8; i++) {
             channelSelect.getItems().add("CH" + i);
         }
         channelSelect.setValue("CH1");
-        channelSelect.setStyle("-fx-font-size: 14px;");
+        channelSelect.setStyle("-fx-font-size: 13px;");
+        channelSelect.setPrefWidth(75);
         channelSelect.setOnAction(e -> {
             String selected = channelSelect.getValue();
             selectedChannel = Integer.parseInt(selected.substring(2));
@@ -174,43 +174,38 @@ public class SignalAnalyzerApp extends Application {
             clearBuffer();
         });
 
-        // Start/Stop buttons
         startButton = new Button("START");
-        startButton.setStyle("-fx-background-color: #4CAF50; -fx-text-fill: white; -fx-font-size: 16px; -fx-font-weight: bold; -fx-padding: 10 30;");
+        startButton.setStyle("-fx-background-color: #4CAF50; -fx-text-fill: white; -fx-font-size: 14px; -fx-font-weight: bold; -fx-padding: 8 20;");
         startButton.setOnAction(e -> startSampling());
 
         stopButton = new Button("STOP");
-        stopButton.setStyle("-fx-background-color: #f44336; -fx-text-fill: white; -fx-font-size: 16px; -fx-font-weight: bold; -fx-padding: 10 30;");
+        stopButton.setStyle("-fx-background-color: #f44336; -fx-text-fill: white; -fx-font-size: 14px; -fx-font-weight: bold; -fx-padding: 8 20;");
         stopButton.setDisable(true);
         stopButton.setOnAction(e -> stopSampling());
 
-        // Auto-scale button (enabled by default)
-        autoScaleButton = new Button("AUTO");
-        autoScaleButton.setStyle("-fx-background-color: #ff9800; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 12;");
-        autoScaleButton.setOnAction(e -> toggleAutoScale());
-
-        // AC coupling button (DC offset removal)
-        acButton = new Button("AC");
-        acButton.setStyle("-fx-background-color: #9c27b0; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 12;");
-        acButton.setOnAction(e -> toggleAcCoupling());
-
-        // Stats labels
-        Label minLabel = new Label("Min: --");
-        minLabel.setTextFill(Color.web("#888899"));
-        minLabel.setId("minLabel");
-
-        Label maxLabel = new Label("Max: --");
-        maxLabel.setTextFill(Color.web("#888899"));
-        maxLabel.setId("maxLabel");
-
-        // Mode toggle buttons
         modeContButton = new Button("CONT");
-        modeContButton.setStyle("-fx-background-color: #ff9800; -fx-text-fill: white; -fx-font-size: 12px; -fx-font-weight: bold; -fx-padding: 6 8;");
+        modeContButton.setStyle("-fx-background-color: #ff9800; -fx-text-fill: white; -fx-font-size: 12px; -fx-font-weight: bold; -fx-padding: 6 10;");
         modeContButton.setOnAction(e -> setMode(false));
 
         modeIntervalButton = new Button("INTRVL");
-        modeIntervalButton.setStyle("-fx-background-color: #666666; -fx-text-fill: white; -fx-font-size: 12px; -fx-font-weight: bold; -fx-padding: 6 8;");
+        modeIntervalButton.setStyle("-fx-background-color: #666666; -fx-text-fill: white; -fx-font-size: 12px; -fx-font-weight: bold; -fx-padding: 6 10;");
         modeIntervalButton.setOnAction(e -> setMode(true));
+
+        autoScaleButton = new Button("AUTO");
+        autoScaleButton.setStyle("-fx-background-color: #ff9800; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 10;");
+        autoScaleButton.setOnAction(e -> toggleAutoScale());
+
+        acButton = new Button("AC");
+        acButton.setStyle("-fx-background-color: #9c27b0; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 10;");
+        acButton.setOnAction(e -> toggleAcCoupling());
+
+        Label minLabel = new Label("Min:--");
+        minLabel.setTextFill(Color.web("#888899"));
+        minLabel.setId("minLabel");
+
+        Label maxLabel = new Label("Max:--");
+        maxLabel.setTextFill(Color.web("#888899"));
+        maxLabel.setId("maxLabel");
 
         controlsRow.getChildren().addAll(chLabel, channelSelect, startButton, stopButton, modeContButton, modeIntervalButton, autoScaleButton, acButton, minLabel, maxLabel);
 
@@ -416,8 +411,40 @@ public class SignalAnalyzerApp extends Application {
             sum += voltages[i];
         }
 
-        // Pre-compute DC offset for trigger search
+        // Pre-compute DC offset
         double tempDc = acCoupling ? sum / voltages.length : 0;
+
+        // In interval mode, extract one cycle first
+        if (intervalMode) {
+            double[] acVoltages = new double[voltages.length];
+            for (int i = 0; i < voltages.length; i++) {
+                acVoltages[i] = voltages[i] - tempDc;
+            }
+            int[] bounds = findCycleBounds(acVoltages);
+            if (bounds != null) {
+                int cycleLen = bounds[1] - bounds[0];
+                int count = Math.min(BUFFER_SIZE, cycleLen);
+                for (int i = 0; i < count; i++) {
+                    buffer[i] = voltages[bounds[0] + i];
+                }
+                // Zero-fill rest of buffer so display is clean
+                for (int i = count; i < BUFFER_SIZE; i++) {
+                    buffer[i] = voltages[bounds[0]];
+                }
+                bufferIndex = count;
+                // Estimate frequency from cycle length and sample duration
+                double duration = controller.getLastSampleDurationSeconds();
+                if (duration > 0) {
+                    double sampleRate = samples.length / duration;
+                    double freq = sampleRate / cycleLen;
+                    smoothedFreq = freq;
+                    freqLabel.setText(formatFreq(freq));
+                }
+                updateDisplay();
+                return;
+            }
+            // Fallback: no cycle found, display all
+        }
 
         // Find trigger in full sample array
         int trigStart = 0;
@@ -454,6 +481,43 @@ public class SignalAnalyzerApp extends Application {
         } else {
             freqLabel.setText("-- Hz");
         }
+    }
+
+    /**
+     * Find one complete sine cycle using rising zero-crossings.
+     * Uses median period from all crossings to reject noise.
+     */
+    private int[] findCycleBounds(double[] signal) {
+        java.util.List<Integer> crossings = new java.util.ArrayList<>();
+        for (int i = 1; i < signal.length; i++) {
+            if (signal[i - 1] < 0 && signal[i] >= 0) {
+                crossings.add(i);
+            }
+        }
+        if (crossings.size() < 2) return null;
+
+        java.util.List<Integer> spacings = new java.util.ArrayList<>();
+        for (int i = 1; i < crossings.size(); i++) {
+            spacings.add(crossings.get(i) - crossings.get(i - 1));
+        }
+        spacings.sort(Integer::compareTo);
+        int medianPeriod = spacings.get(spacings.size() / 2);
+
+        if (medianPeriod < 10) return null;
+
+        int start = crossings.get(0);
+        int targetEnd = start + medianPeriod;
+        int bestEnd = -1;
+        int bestDist = Integer.MAX_VALUE;
+        for (int i = 1; i < crossings.size(); i++) {
+            int dist = Math.abs(crossings.get(i) - targetEnd);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestEnd = crossings.get(i);
+            }
+        }
+        if (bestEnd <= start) return null;
+        return new int[]{start, bestEnd};
     }
 
     private void stopSampling() {
