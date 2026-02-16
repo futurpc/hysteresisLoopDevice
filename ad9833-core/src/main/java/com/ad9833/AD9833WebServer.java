@@ -29,7 +29,7 @@ public class AD9833WebServer {
 
     // Analyzer state
     private volatile boolean analyzerRunning = false;
-    private int analyzerChannel = 1;
+    private int analyzerChannel = 3;
     private int analyzerChannel2 = -1; // -1 = OFF
     private int analyzerSamplesPerFrame = 1000;
     private volatile int[] lastRawCh1;
@@ -198,13 +198,6 @@ public class AD9833WebServer {
                 analyzerSamplesPerFrame = Integer.parseInt(params.get("samples"));
             }
             analyzerRunning = true;
-            if (adcController != null) {
-                if (analyzerChannel2 >= 0) {
-                    adcController.startDualContinuousSampling(analyzerChannel, analyzerChannel2, analyzerSamplesPerFrame);
-                } else {
-                    adcController.startContinuousSampling(analyzerChannel, analyzerSamplesPerFrame);
-                }
-            }
             sendJson(exchange, "{\"status\":\"ok\",\"running\":true}");
         }
     }
@@ -213,9 +206,6 @@ public class AD9833WebServer {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
             analyzerRunning = false;
-            if (adcController != null) {
-                adcController.stopContinuousSampling();
-            }
             sendJson(exchange, "{\"status\":\"ok\",\"running\":false}");
         }
     }
@@ -230,7 +220,6 @@ public class AD9833WebServer {
             exchange.sendResponseHeaders(200, 0);
 
             try (OutputStream os = exchange.getResponseBody()) {
-                int[] lastSent = null;
                 while (analyzerRunning) {
                     if (adcController == null) {
                         String msg = "data: {\"error\":\"ADC not available\"}\n\n";
@@ -240,51 +229,61 @@ public class AD9833WebServer {
                     }
 
                     try {
-                        int[] raw;
-                        int[] raw2 = null;
-                        if (analyzerChannel2 >= 0) {
-                            raw = adcController.getLatestSamplesX();
-                            raw2 = adcController.getLatestSamplesY();
-                        } else {
-                            raw = adcController.getLatestSamples();
-                        }
-                        lastRawCh1 = raw;
-                        lastRawCh2 = raw2;
-                        if (raw == null || raw.length == 0 || raw == lastSent) {
-                            Thread.sleep(33);
-                            continue;
-                        }
-                        lastSent = raw;
-                        double measuredFreq = adcController.getLatestFrequency();
-                        double sampleDuration = adcController.getLatestSampleDuration();
-                        long dtUs = (long)(sampleDuration * 1_000_000);
                         StringBuilder sb = new StringBuilder("data: {\"v\":[");
-                        for (int i = 0; i < raw.length; i++) {
-                            if (i > 0) sb.append(',');
-                            double voltage = (raw[i] * 3.3) / 4095.0;
-                            sb.append(String.format("%.4f", voltage));
-                        }
-                        sb.append("]");
-                        if (raw2 != null && raw2.length > 0) {
-                            sb.append(",\"v2\":[");
-                            for (int i = 0; i < raw2.length; i++) {
-                                if (i > 0) sb.append(',');
-                                double voltage = (raw2[i] * 3.3) / 4095.0;
-                                sb.append(String.format("%.4f", voltage));
+                        int rawSamples = Math.max(analyzerSamplesPerFrame, 10000);
+                        int targetPoints = 2000;
+
+                        if (analyzerChannel2 >= 0) {
+                            MCP3208Controller.CoherentResult[] cr =
+                                adcController.sampleCoherentDual(analyzerChannel, analyzerChannel2,
+                                                                  targetPoints, rawSamples);
+                            if (cr != null && cr[0].cyclesAveraged > 0) {
+                                lastRawCh1 = cr[0].averagedValues;
+                                lastRawCh2 = cr[1].averagedValues;
+                                for (int i = 0; i < cr[0].averagedValues.length; i++) {
+                                    if (i > 0) sb.append(',');
+                                    sb.append(String.format("%.4f", (cr[0].averagedValues[i] * 3.3) / 4095.0));
+                                }
+                                sb.append("],\"v2\":[");
+                                for (int i = 0; i < cr[1].averagedValues.length; i++) {
+                                    if (i > 0) sb.append(',');
+                                    sb.append(String.format("%.4f", (cr[1].averagedValues[i] * 3.3) / 4095.0));
+                                }
+                                sb.append("]");
+                                sb.append(",\"freq\":").append(String.format("%.2f", cr[0].frequencyHz));
+                                sb.append(",\"cycles\":").append(cr[0].cyclesAveraged);
+                                sb.append(",\"coherent\":true");
+                            } else {
+                                sb.append("],\"error\":\"Period detection failed\"");
                             }
-                            sb.append("]");
+                        } else {
+                            MCP3208Controller.CoherentResult cr =
+                                adcController.sampleCoherent(analyzerChannel, targetPoints, rawSamples);
+                            if (cr != null && cr.cyclesAveraged > 0) {
+                                lastRawCh1 = cr.averagedValues;
+                                lastRawCh2 = null;
+                                for (int i = 0; i < cr.averagedValues.length; i++) {
+                                    if (i > 0) sb.append(',');
+                                    sb.append(String.format("%.4f", (cr.averagedValues[i] * 3.3) / 4095.0));
+                                }
+                                sb.append("]");
+                                sb.append(",\"freq\":").append(String.format("%.2f", cr.frequencyHz));
+                                sb.append(",\"cycles\":").append(cr.cyclesAveraged);
+                                sb.append(",\"coherent\":true");
+                            } else {
+                                sb.append("],\"error\":\"Period detection failed\"");
+                            }
                         }
-                        sb.append(",\"dt\":").append(dtUs);
-                        sb.append(",\"freq\":").append(String.format("%.2f", measuredFreq));
                         sb.append("}\n\n");
                         os.write(sb.toString().getBytes(StandardCharsets.UTF_8));
                         os.flush();
 
-                        Thread.sleep(33); // ~30fps
+                        Thread.sleep(100); // ~200ms capture + 100ms pause
                     } catch (IOException e) {
                         break; // Client disconnected
                     } catch (Exception e) {
                         // Continue on sampling errors
+                        try { Thread.sleep(500); } catch (InterruptedException ie) { break; }
                     }
                 }
             } catch (IOException ignored) {
@@ -309,37 +308,84 @@ public class AD9833WebServer {
                     String c2 = params.get("channel2");
                     ch2 = "off".equalsIgnoreCase(c2) ? -1 : Integer.parseInt(c2);
                 }
-                int samples = params.containsKey("samples") ? Integer.parseInt(params.get("samples")) : 2000;
+                int samples = params.containsKey("samples") ? Integer.parseInt(params.get("samples")) : 10000;
+                boolean coherent = "true".equals(params.get("coherent"));
 
-                StringBuilder sb = new StringBuilder("data: {\"v\":[");
-                if (ch2 >= 0) {
-                    int[][] xy = adcController.sampleFastDualChannel(ch1, ch2, samples);
-                    lastRawCh1 = xy[0];
-                    lastRawCh2 = xy[1];
-                    for (int i = 0; i < xy[0].length; i++) {
-                        if (i > 0) sb.append(',');
-                        sb.append(String.format("%.4f", (xy[0][i] * 3.3) / 4095.0));
+                if (coherent) {
+                    int targetPoints = params.containsKey("points") ? Integer.parseInt(params.get("points")) : 2000;
+                    StringBuilder sb = new StringBuilder("{\"v\":[");
+                    if (ch2 >= 0) {
+                        MCP3208Controller.CoherentResult[] cr = adcController.sampleCoherentDual(ch1, ch2, targetPoints, samples);
+                        if (cr != null && cr[0].cyclesAveraged > 0) {
+                            for (int i = 0; i < cr[0].averagedValues.length; i++) {
+                                if (i > 0) sb.append(',');
+                                sb.append(String.format("%.4f", (cr[0].averagedValues[i] * 3.3) / 4095.0));
+                            }
+                            sb.append("],\"v2\":[");
+                            for (int i = 0; i < cr[1].averagedValues.length; i++) {
+                                if (i > 0) sb.append(',');
+                                sb.append(String.format("%.4f", (cr[1].averagedValues[i] * 3.3) / 4095.0));
+                            }
+                            sb.append("]");
+                            lastRawCh1 = cr[0].averagedValues;
+                            lastRawCh2 = cr[1].averagedValues;
+                            sb.append(",\"freq\":").append(String.format("%.2f", cr[0].frequencyHz));
+                            sb.append(",\"cycles\":").append(cr[0].cyclesAveraged);
+                            sb.append(",\"coherent\":true");
+                        } else {
+                            sb.append("],\"error\":\"Period detection failed\"");
+                        }
+                    } else {
+                        MCP3208Controller.CoherentResult cr = adcController.sampleCoherent(ch1, targetPoints, samples);
+                        if (cr != null && cr.cyclesAveraged > 0) {
+                            for (int i = 0; i < cr.averagedValues.length; i++) {
+                                if (i > 0) sb.append(',');
+                                sb.append(String.format("%.4f", (cr.averagedValues[i] * 3.3) / 4095.0));
+                            }
+                            sb.append("]");
+                            lastRawCh1 = cr.averagedValues;
+                            lastRawCh2 = null;
+                            sb.append(",\"freq\":").append(String.format("%.2f", cr.frequencyHz));
+                            sb.append(",\"cycles\":").append(cr.cyclesAveraged);
+                            sb.append(",\"coherent\":true");
+                        } else {
+                            sb.append("],\"error\":\"Period detection failed\"");
+                        }
                     }
-                    sb.append("],\"v2\":[");
-                    for (int i = 0; i < xy[1].length; i++) {
-                        if (i > 0) sb.append(',');
-                        sb.append(String.format("%.4f", (xy[1][i] * 3.3) / 4095.0));
-                    }
-                    sb.append("]");
+                    sb.append("}");
+                    sendJson(exchange, sb.toString());
                 } else {
-                    int[] raw = adcController.sampleFast(ch1, samples);
-                    lastRawCh1 = raw;
-                    lastRawCh2 = null;
-                    for (int i = 0; i < raw.length; i++) {
-                        if (i > 0) sb.append(',');
-                        sb.append(String.format("%.4f", (raw[i] * 3.3) / 4095.0));
+                    // Legacy non-coherent mode
+                    StringBuilder sb = new StringBuilder("{\"v\":[");
+                    if (ch2 >= 0) {
+                        int[][] xy = adcController.sampleFastDualChannel(ch1, ch2, samples);
+                        lastRawCh1 = xy[0];
+                        lastRawCh2 = xy[1];
+                        for (int i = 0; i < xy[0].length; i++) {
+                            if (i > 0) sb.append(',');
+                            sb.append(String.format("%.4f", (xy[0][i] * 3.3) / 4095.0));
+                        }
+                        sb.append("],\"v2\":[");
+                        for (int i = 0; i < xy[1].length; i++) {
+                            if (i > 0) sb.append(',');
+                            sb.append(String.format("%.4f", (xy[1][i] * 3.3) / 4095.0));
+                        }
+                        sb.append("]");
+                    } else {
+                        int[] raw = adcController.sampleFast(ch1, samples);
+                        lastRawCh1 = raw;
+                        lastRawCh2 = null;
+                        for (int i = 0; i < raw.length; i++) {
+                            if (i > 0) sb.append(',');
+                            sb.append(String.format("%.4f", (raw[i] * 3.3) / 4095.0));
+                        }
+                        sb.append("]");
                     }
-                    sb.append("]");
+                    double duration = adcController.getLastSampleDurationSeconds();
+                    sb.append(",\"dt\":").append((long)(duration * 1_000_000));
+                    sb.append("}");
+                    sendJson(exchange, sb.toString());
                 }
-                double duration = adcController.getLastSampleDurationSeconds();
-                sb.append(",\"dt\":").append((long)(duration * 1_000_000));
-                sb.append("}");
-                sendJson(exchange, sb.toString());
             } catch (Exception e) {
                 sendJson(exchange, "{\"error\":\"" + e.getMessage() + "\"}");
             }
@@ -502,17 +548,25 @@ public class AD9833WebServer {
             <span style="color:#00ff88;font-size:12px;font-weight:bold">1:</span>
             <select id="channelSel" onchange="scopeUpdateSettings()" style="width:60px">
                 <option value="0">CH0</option>
-                <option value="1" selected>CH1</option>
+                <option value="1">CH1</option>
                 <option value="2">CH2</option>
-                <option value="3">CH3</option>
+                <option value="3" selected>CH3</option>
+                <option value="4">CH4</option>
+                <option value="5">CH5</option>
+                <option value="6">CH6</option>
+                <option value="7">CH7</option>
             </select>
             <span style="color:#00aaff;font-size:12px;font-weight:bold">2:</span>
             <select id="channelSel2" onchange="scopeUpdateSettings()" style="width:60px">
-                <option value="off">OFF</option>
+                <option value="off" selected>OFF</option>
                 <option value="0">CH0</option>
                 <option value="1">CH1</option>
-                <option value="2" selected>CH2</option>
+                <option value="2">CH2</option>
                 <option value="3">CH3</option>
+                <option value="4">CH4</option>
+                <option value="5">CH5</option>
+                <option value="6">CH6</option>
+                <option value="7">CH7</option>
             </select>
             <button class="toggle-btn active" id="autoBtn" onclick="toggleAuto()">AUTO</button>
             <button class="toggle-btn active-ac" id="acBtn" onclick="toggleAC()">AC</button>
@@ -531,15 +585,33 @@ public class AD9833WebServer {
         </div>
         <div class="scope-controls" id="intervalRow" style="display:none">
             <span style="color:#ccc;font-size:13px;font-weight:bold">Interval:</span>
-            <button class="interval-btn active" onclick="setInterval2(1)">1s</button>
-            <button class="interval-btn" onclick="setInterval2(5)">5s</button>
-            <button class="interval-btn" onclick="setInterval2(10)">10s</button>
-            <button class="interval-btn" onclick="setInterval2(20)">20s</button>
+            <button class="interval-btn active" onclick="setInterval2(1,this)">1s</button>
+            <button class="interval-btn" onclick="setInterval2(5,this)">5s</button>
+            <button class="interval-btn" onclick="setInterval2(10,this)">10s</button>
+            <button class="interval-btn" onclick="setInterval2(20,this)">20s</button>
             <button class="interval-btn" onclick="togglePause()" id="pauseBtn">PAUSE</button>
-            <span style="color:#888;font-size:12px">Smp:</span>
-            <input type="range" id="intSamplesSlider" min="500" max="5000" value="2000" style="width:100px" oninput="intSmpVal.textContent=this.value">
-            <span class="val" id="intSmpVal" style="color:#00aaff;font-family:monospace;font-size:13px">2000</span>
+            <span style="color:#888;font-size:12px">Raw:</span>
+            <input type="range" id="intSamplesSlider" min="5000" max="10000" value="10000" style="width:100px" oninput="intSmpVal.textContent=this.value">
+            <span class="val" id="intSmpVal" style="color:#00aaff;font-family:monospace;font-size:13px">10000</span>
             <button class="csv-btn" onclick="downloadCsv()">CSV</button>
+        </div>
+
+        <!-- Hysteresis Loop X-Y Plot -->
+        <div id="xySection" style="display:none">
+            <h2 style="color:#ff66aa;margin-top:8px;font-size:16px">Hysteresis Loop</h2>
+            <div style="display:flex;gap:10px;align-items:flex-start;justify-content:center">
+                <div class="canvas-wrap" style="flex:0 0 auto">
+                    <canvas id="xyPlot" width="340" height="300"></canvas>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:6px;padding-top:5px">
+                    <span style="font-family:'Courier New',monospace;font-size:16px;color:#00ff88" id="xVpp">X: -- Vpp</span>
+                    <span style="font-family:'Courier New',monospace;font-size:16px;color:#00aaff" id="yVpp">Y: -- Vpp</span>
+                    <button class="toggle-btn active-ac" id="xyAcBtn" onclick="toggleXYAC()">AC</button>
+                    <button class="toggle-btn active" id="xyAutoBtn" onclick="toggleXYAuto()">AUTO</button>
+                    <button class="toggle-btn" id="xyPersistBtn" onclick="toggleXYPersist()">PERSIST</button>
+                    <button class="toggle-btn" style="background:#607D8B;color:white;border-color:#607D8B" onclick="clearXY()">CLEAR</button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -586,7 +658,7 @@ public class AD9833WebServer {
     // ===== ANALYZER =====
     const canvas = document.getElementById('scope');
     const ctx = canvas.getContext('2d');
-    const BUFFER_SIZE = 400;
+    const BUFFER_SIZE = 6000;
     let buffer = new Float64Array(BUFFER_SIZE);
     let buffer2 = new Float64Array(BUFFER_SIZE);
     let bufferIndex = 0;
@@ -621,6 +693,7 @@ public class AD9833WebServer {
         buffer.fill(0); buffer2.fill(0); bufferIndex = 0;
         dualChannel = document.getElementById('channelSel2').value !== 'off';
         document.getElementById('voltageDisplay2').style.display = dualChannel ? '' : 'none';
+        document.getElementById('xySection').style.display = dualChannel ? '' : 'none';
     }
 
     async function startAnalyzer() {
@@ -629,6 +702,7 @@ public class AD9833WebServer {
         let ch2 = document.getElementById('channelSel2').value;
         dualChannel = ch2 !== 'off';
         document.getElementById('voltageDisplay2').style.display = dualChannel ? '' : 'none';
+        document.getElementById('xySection').style.display = dualChannel ? '' : 'none';
         await fetch('/api/analyzer/start?channel=' + ch + '&channel2=' + ch2 + '&samples=1000');
         scopeRunning = true;
         document.getElementById('scopeDot').className = 'status-dot running';
@@ -637,12 +711,17 @@ public class AD9833WebServer {
         eventSource = new EventSource('/api/analyzer/stream');
         eventSource.onmessage = function(e) {
             let data = JSON.parse(e.data);
-            if (data.error) { stopAnalyzer(); return; }
-            processFrame(data);
-            if (data.freq && data.freq > 0) {
-                smoothedFreq = smoothedFreq === 0 ? data.freq : smoothedFreq * 0.7 + data.freq * 0.3;
-                document.getElementById('measuredFreq').textContent = formatFreqHz(smoothedFreq);
+            if (data.error) return;
+            if (data.coherent) {
+                processCoherentFrame(data);
+            } else {
+                processFrame(data);
+                if (data.freq && data.freq > 0) {
+                    smoothedFreq = smoothedFreq === 0 ? data.freq : smoothedFreq * 0.7 + data.freq * 0.3;
+                    document.getElementById('measuredFreq').textContent = formatFreqHz(smoothedFreq);
+                }
             }
+            drawWaveform();
         };
         eventSource.onerror = function() { stopAnalyzer(); };
         requestAnimationFrame(drawLoop);
@@ -671,8 +750,8 @@ public class AD9833WebServer {
     function drawWaveform() {
         let w = canvas.width, h = canvas.height;
 
-        // How many valid samples to use
-        let validSamples = (cycleLength > 0 && cycleLength < BUFFER_SIZE) ? cycleLength : BUFFER_SIZE;
+        // How many valid samples to use (cycleLength tracks valid count in both modes)
+        let validSamples = (cycleLength > 0) ? cycleLength : (bufferIndex > 0 && bufferIndex < BUFFER_SIZE) ? bufferIndex : BUFFER_SIZE;
 
         // DC offsets
         if (acCoupling) {
@@ -740,11 +819,12 @@ public class AD9833WebServer {
 
         let dispSamples;
         let xOff = 0;
-        if (cycleLength > 0 && cycleLength < BUFFER_SIZE) {
-            dispSamples = cycleLength;
+        if (scopeMode === 'interval' && cycleLength > 0) {
+            dispSamples = cycleLength;  // interval mode: show full period
         } else {
             let zoomPct = parseInt(document.getElementById('zoomSlider').value);
-            dispSamples = Math.floor(BUFFER_SIZE * zoomPct / 100);
+            dispSamples = Math.min(validSamples, Math.floor(validSamples * zoomPct / 100));
+            if (dispSamples < 2) dispSamples = 2;
             let pxPerSample = w / dispSamples;
             xOff = triggerEnabled ? -trigFrac * pxPerSample : 0;
         }
@@ -815,6 +895,11 @@ public class AD9833WebServer {
 
     // ===== MODE / INTERVAL / CSV =====
     function setMode(m) {
+        // Stop current mode before switching
+        if (scopeRunning) {
+            if (scopeMode === 'cont') stopAnalyzer();
+            else stopIntervalMode();
+        }
         scopeMode = m;
         document.getElementById('contBtn').className = m==='cont' ? 'toggle-btn active' : 'toggle-btn';
         document.getElementById('intBtn').className = m==='interval' ? 'toggle-btn active' : 'toggle-btn';
@@ -853,15 +938,46 @@ public class AD9833WebServer {
         document.getElementById('voltageDisplay2').style.display = dualChannel ? '' : 'none';
         let smp = document.getElementById('intSamplesSlider').value;
         try {
-            let resp = await fetch('/api/analyzer/sample?channel=' + ch + '&channel2=' + ch2 + '&samples=' + smp);
+            let resp = await fetch('/api/analyzer/sample?channel=' + ch + '&channel2=' + ch2 + '&samples=' + smp + '&coherent=true');
             let text = await resp.text();
-            // Strip "data: " prefix if present
             let json = text.startsWith('data: ') ? text.substring(6) : text;
             let data = JSON.parse(json);
             if (data.error) return;
-            processFrame(data);
+            if (data.coherent) {
+                processCoherentFrame(data);
+            } else {
+                processFrame(data);
+            }
             drawWaveform();
         } catch(e) {}
+    }
+
+    function processCoherentFrame(data) {
+        let voltages = data.v;
+        let voltages2 = data.v2 || null;
+        let period = voltages.length;  // one period worth of points
+        // Tile 3 periods into the buffer for zoom-out view
+        let total = Math.min(BUFFER_SIZE, period * 3);
+        for (let i = 0; i < total; i++) buffer[i] = voltages[i % period];
+        for (let i = total; i < BUFFER_SIZE; i++) buffer[i] = 0;
+        cycleLength = total;
+
+        if (dualChannel && voltages2) {
+            let period2 = voltages2.length;
+            let total2 = Math.min(BUFFER_SIZE, period2 * 3);
+            for (let i = 0; i < total2; i++) buffer2[i] = voltages2[i % period2];
+            for (let i = total2; i < BUFFER_SIZE; i++) buffer2[i] = 0;
+        }
+
+        if (data.freq && data.freq > 0) {
+            smoothedFreq = data.freq;
+            let label = formatFreqHz(data.freq);
+            if (data.cycles) label += ' (' + data.cycles + ' cycles)';
+            document.getElementById('measuredFreq').textContent = label;
+        }
+
+        // Update hysteresis loop X-Y plot
+        if (dualChannel && data.v2) updateXYPlot(data);
     }
 
     function findCycleBounds(signal) {
@@ -947,19 +1063,23 @@ public class AD9833WebServer {
         }
     }
 
-    function setInterval2(s) {
+    function setInterval2(s, btn) {
         intervalSec = s; intervalPaused = false;
         document.querySelectorAll('.interval-btn').forEach(b => b.className = 'interval-btn');
-        event.target.className = 'interval-btn active';
+        if (btn) btn.className = 'interval-btn active';
         document.getElementById('pauseBtn').className = 'interval-btn';
         if (scopeRunning && intervalTimer) {
             clearInterval(intervalTimer);
+            doIntervalSample();
             intervalTimer = setInterval(() => { if (!intervalPaused) doIntervalSample(); }, intervalSec * 1000);
         }
     }
 
     function togglePause() {
         intervalPaused = !intervalPaused;
+        document.querySelectorAll('.interval-btn').forEach(b => {
+            if (b.id !== 'pauseBtn') b.className = 'interval-btn';
+        });
         document.getElementById('pauseBtn').className = intervalPaused ? 'interval-btn active' : 'interval-btn';
         document.getElementById('scopeStatus').textContent = intervalPaused ? 'Paused' : 'Interval';
     }
@@ -967,6 +1087,125 @@ public class AD9833WebServer {
     function downloadCsv() {
         window.open('/api/analyzer/csv', '_blank');
     }
+
+    // ===== HYSTERESIS LOOP (X-Y Plot) =====
+    const xyCanvas = document.getElementById('xyPlot');
+    const xyCtx = xyCanvas.getContext('2d');
+    let xyAC = true, xyAuto = true, xyPersist = false;
+    let xyMinX = -1.65, xyMaxX = 1.65, xyMinY = -1.65, xyMaxY = 1.65;
+    let xyPersistBuf = [];
+    const MAX_XY_PERSIST = 5000;
+
+    function drawXYGrid() {
+        let w = xyCanvas.width, h = xyCanvas.height;
+        xyCtx.fillStyle = '#0a0a15';
+        xyCtx.fillRect(0, 0, w, h);
+        xyCtx.strokeStyle = '#222244'; xyCtx.lineWidth = 1;
+        for (let i = 0; i <= 8; i++) {
+            let x = i*w/8; xyCtx.beginPath(); xyCtx.moveTo(x,0); xyCtx.lineTo(x,h); xyCtx.stroke();
+            let y = i*h/8; xyCtx.beginPath(); xyCtx.moveTo(0,y); xyCtx.lineTo(w,y); xyCtx.stroke();
+        }
+        xyCtx.strokeStyle = '#334466'; xyCtx.lineWidth = 1.5;
+        xyCtx.beginPath(); xyCtx.moveTo(w/2,0); xyCtx.lineTo(w/2,h); xyCtx.stroke();
+        xyCtx.beginPath(); xyCtx.moveTo(0,h/2); xyCtx.lineTo(w,h/2); xyCtx.stroke();
+        xyCtx.fillStyle = '#666688'; xyCtx.font = '10px monospace';
+        xyCtx.fillText('X:'+xyMinX.toFixed(2)+'V', 3, h-3);
+        xyCtx.fillText(xyMaxX.toFixed(2)+'V', w-50, h-3);
+        xyCtx.fillText('Y:'+xyMaxY.toFixed(2)+'V', 3, 11);
+        xyCtx.fillText(xyMinY.toFixed(2)+'V', 3, h-14);
+    }
+
+    function updateXYPlot(data) {
+        if (!data.v2 || !dualChannel) return;
+        let vx = data.v, vy = data.v2;
+        let len = Math.min(vx.length, vy.length);
+
+        // AC coupling: subtract mean
+        let sumX = 0, sumY = 0;
+        for (let i = 0; i < len; i++) { sumX += vx[i]; sumY += vy[i]; }
+        let dcX = xyAC ? sumX/len : 0;
+        let dcY = xyAC ? sumY/len : 0;
+
+        let cx = new Float64Array(len), cy = new Float64Array(len);
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (let i = 0; i < len; i++) {
+            cx[i] = vx[i] - dcX; cy[i] = vy[i] - dcY;
+            if (cx[i] < minX) minX = cx[i]; if (cx[i] > maxX) maxX = cx[i];
+            if (cy[i] < minY) minY = cy[i]; if (cy[i] > maxY) maxY = cy[i];
+        }
+
+        document.getElementById('xVpp').textContent = 'X: ' + (maxX-minX).toFixed(3) + ' Vpp';
+        document.getElementById('yVpp').textContent = 'Y: ' + (maxY-minY).toFixed(3) + ' Vpp';
+
+        // Auto-scale
+        if (xyAuto && minX < maxX && minY < maxY) {
+            let rx = maxX-minX, mx = rx*0.1;
+            let ry = maxY-minY, my = ry*0.1;
+            if (xyAC) {
+                let ax = Math.max(Math.abs(minX-mx), Math.abs(maxX+mx));
+                xyMinX = -ax; xyMaxX = ax;
+                let ay = Math.max(Math.abs(minY-my), Math.abs(maxY+my));
+                xyMinY = -ay; xyMaxY = ay;
+            } else {
+                xyMinX = Math.max(0, minX-mx); xyMaxX = Math.min(3.3, maxX+mx);
+                xyMinY = Math.max(0, minY-my); xyMaxY = Math.min(3.3, maxY+my);
+            }
+        }
+
+        // Persistence: accumulate
+        if (xyPersist) {
+            for (let i = 0; i < len; i++) xyPersistBuf.push([cx[i], cy[i]]);
+            while (xyPersistBuf.length > MAX_XY_PERSIST) xyPersistBuf.shift();
+        }
+
+        // Draw
+        let w = xyCanvas.width, h = xyCanvas.height;
+        drawXYGrid();
+        let rx = xyMaxX - xyMinX, ry = xyMaxY - xyMinY;
+        if (rx <= 0) rx = 3.3; if (ry <= 0) ry = 3.3;
+
+        // Persistence layer (dimmer)
+        if (xyPersist && xyPersistBuf.length > 0) {
+            xyCtx.strokeStyle = 'rgba(0,255,136,0.3)'; xyCtx.lineWidth = 1;
+            xyCtx.beginPath();
+            for (let i = 0; i < xyPersistBuf.length; i++) {
+                let px = Math.max(0, Math.min(w, ((xyPersistBuf[i][0]-xyMinX)/rx)*w));
+                let py = Math.max(0, Math.min(h, h - ((xyPersistBuf[i][1]-xyMinY)/ry)*h));
+                if (i===0) xyCtx.moveTo(px,py); else xyCtx.lineTo(px,py);
+            }
+            xyCtx.stroke();
+        }
+
+        // Current frame
+        xyCtx.strokeStyle = '#00ff88'; xyCtx.lineWidth = 2;
+        xyCtx.beginPath();
+        for (let i = 0; i < len; i++) {
+            let px = Math.max(0, Math.min(w, ((cx[i]-xyMinX)/rx)*w));
+            let py = Math.max(0, Math.min(h, h - ((cy[i]-xyMinY)/ry)*h));
+            if (i===0) xyCtx.moveTo(px,py); else xyCtx.lineTo(px,py);
+        }
+        xyCtx.stroke();
+    }
+
+    function toggleXYAC() {
+        xyAC = !xyAC;
+        document.getElementById('xyAcBtn').className = xyAC ? 'toggle-btn active-ac' : 'toggle-btn';
+        if (!xyAuto) { xyMinX = xyAC?-1.65:0; xyMaxX = xyAC?1.65:3.3; xyMinY = xyAC?-1.65:0; xyMaxY = xyAC?1.65:3.3; }
+    }
+    function toggleXYAuto() {
+        xyAuto = !xyAuto;
+        document.getElementById('xyAutoBtn').className = xyAuto ? 'toggle-btn active' : 'toggle-btn';
+        if (!xyAuto) { xyMinX = xyAC?-1.65:0; xyMaxX = xyAC?1.65:3.3; xyMinY = xyAC?-1.65:0; xyMaxY = xyAC?1.65:3.3; }
+    }
+    function toggleXYPersist() {
+        xyPersist = !xyPersist;
+        document.getElementById('xyPersistBtn').className = xyPersist ? 'toggle-btn active' : 'toggle-btn';
+        if (!xyPersist) xyPersistBuf = [];
+    }
+    function clearXY() { xyPersistBuf = []; drawXYGrid(); }
+
+    // Init X-Y plot
+    drawXYGrid();
 
     // ===== GENERATOR =====
     let currentFreq = 1000, currentPhase = 0, currentWave = 'SINE', genRunning = false;

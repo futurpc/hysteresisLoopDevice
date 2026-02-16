@@ -79,12 +79,18 @@ public class HysteresisLoopApp extends Application {
 
     // Interval mode
     private static final int INTERVAL_SAMPLE_PAIRS = 2000;  // oversample to find one cycle
+    private static final int COHERENT_TARGET_POINTS = 2000;  // output points per period
+    private static final int COHERENT_RAW_SAMPLES = 10000;   // raw samples to capture
     private volatile int intervalSeconds = 5;
     private volatile boolean intervalPaused = false;
     private Thread intervalThread;
     private VBox intervalControls;
     private Button[] intervalBtns;
     private Button pauseBtn;
+
+    // Continuous coherent mode
+    private Thread contCoherentThread;
+    private volatile MCP3208Controller.CoherentResult[] latestCoherentResult;
 
     /**
      * Called from MainMenuApp to start with a back button
@@ -162,6 +168,7 @@ public class HysteresisLoopApp extends Application {
             if (controller != null && isRunning) {
                 controller.setSamplerChannels(selectedChannelX, selectedChannelY);
             }
+            saveConfig();
         });
 
         yChannelSelect = new ComboBox<>();
@@ -174,6 +181,7 @@ public class HysteresisLoopApp extends Application {
             if (controller != null && isRunning) {
                 controller.setSamplerChannels(selectedChannelX, selectedChannelY);
             }
+            saveConfig();
         });
 
         HBox xChRow = new HBox(5);
@@ -311,6 +319,7 @@ public class HysteresisLoopApp extends Application {
         primaryStage.show();
 
         initController();
+        loadConfig();
     }
 
     private void initController() {
@@ -348,23 +357,37 @@ public class HysteresisLoopApp extends Application {
     }
 
     private void startContinuousSampling() {
-        controller.startDualContinuousSampling(selectedChannelX, selectedChannelY, SAMPLE_PAIRS);
+        latestCoherentResult = null;
 
+        // Background thread: continuously calls sampleCoherentDual (~200-500ms per call)
+        contCoherentThread = new Thread(() -> {
+            while (isRunning && !Thread.currentThread().isInterrupted()) {
+                try {
+                    MCP3208Controller.CoherentResult[] cr = controller.sampleCoherentDual(
+                            selectedChannelX, selectedChannelY,
+                            COHERENT_TARGET_POINTS, COHERENT_RAW_SAMPLES);
+                    latestCoherentResult = cr;
+                } catch (InterruptedException e) {
+                    break;
+                } catch (Exception e) {
+                    try { Thread.sleep(500); } catch (InterruptedException ie) { break; }
+                }
+            }
+        }, "hyst-cont-coherent-sampler");
+        contCoherentThread.setDaemon(true);
+        contCoherentThread.start();
+
+        // AnimationTimer polls for new results
         timer = new AnimationTimer() {
-            private long lastUpdate = 0;
+            private Object lastDisplayedRef = null;
 
             @Override
             public void handle(long now) {
-                if (now - lastUpdate >= 33_000_000) {  // ~30fps
-                    lastUpdate = now;
-                    int[] samplesX = controller.getLatestSamplesX();
-                    int[] samplesY = controller.getLatestSamplesY();
-                    if (samplesX.length == 0 || samplesY.length == 0) return;
-                    if (samplesX == lastProcessedX && samplesY == lastProcessedY) return;
-                    lastProcessedX = samplesX;
-                    lastProcessedY = samplesY;
-
-                    processAndDraw(samplesX, samplesY, false);
+                MCP3208Controller.CoherentResult[] cr = latestCoherentResult;
+                if (cr == null || cr == lastDisplayedRef) return;
+                lastDisplayedRef = cr;
+                if (cr[0].cyclesAveraged > 0) {
+                    processAndDrawCoherent(cr);
                 }
             }
         };
@@ -376,13 +399,11 @@ public class HysteresisLoopApp extends Application {
         intervalThread = new Thread(() -> {
             while (isRunning) {
                 try {
-                    int[][] xy = controller.sampleFastDualChannel(
-                        selectedChannelX, selectedChannelY, INTERVAL_SAMPLE_PAIRS);
-                    int[] samplesX = xy[0];
-                    int[] samplesY = xy[1];
-
-                    if (samplesX.length > 0 && samplesY.length > 0) {
-                        Platform.runLater(() -> processAndDraw(samplesX, samplesY, true));
+                    MCP3208Controller.CoherentResult[] cr = controller.sampleCoherentDual(
+                            selectedChannelX, selectedChannelY,
+                            COHERENT_TARGET_POINTS, COHERENT_RAW_SAMPLES);
+                    if (cr != null && cr[0].cyclesAveraged > 0) {
+                        Platform.runLater(() -> processAndDrawCoherent(cr));
                     }
 
                     // Wait for interval or pause
@@ -406,11 +427,10 @@ public class HysteresisLoopApp extends Application {
                 } catch (InterruptedException e) {
                     break;
                 } catch (Exception e) {
-                    // continue on sampling errors
                     try { Thread.sleep(1000); } catch (InterruptedException ie) { break; }
                 }
             }
-        }, "interval-sampler");
+        }, "hyst-interval-sampler");
         intervalThread.setDaemon(true);
         intervalThread.start();
     }
@@ -508,6 +528,82 @@ public class HysteresisLoopApp extends Application {
     }
 
     /**
+     * Process coherent-averaged dual-channel data for X-Y plot.
+     * Data IS one period (2000 points) — no cycle extraction needed.
+     */
+    private void processAndDrawCoherent(MCP3208Controller.CoherentResult[] cr) {
+        int[] rawX = cr[0].averagedValues;
+        int[] rawY = cr[1].averagedValues;
+        int len = Math.min(rawX.length, rawY.length);
+
+        // Convert to voltages
+        double[] vx = new double[len];
+        double[] vy = new double[len];
+        double sumX = 0, sumY = 0;
+        for (int i = 0; i < len; i++) {
+            vx[i] = (rawX[i] * VREF) / MAX_VALUE;
+            vy[i] = (rawY[i] * VREF) / MAX_VALUE;
+            sumX += vx[i];
+            sumY += vy[i];
+        }
+
+        // AC coupling: subtract mean
+        double dcX = acCoupling ? sumX / len : 0;
+        double dcY = acCoupling ? sumY / len : 0;
+        for (int i = 0; i < len; i++) {
+            vx[i] -= dcX;
+            vy[i] -= dcY;
+        }
+
+        // Compute Vpp
+        double minX = Double.MAX_VALUE, maxX = -Double.MAX_VALUE;
+        double minY = Double.MAX_VALUE, maxY = -Double.MAX_VALUE;
+        for (int i = 0; i < len; i++) {
+            if (vx[i] < minX) minX = vx[i];
+            if (vx[i] > maxX) maxX = vx[i];
+            if (vy[i] < minY) minY = vy[i];
+            if (vy[i] > maxY) maxY = vy[i];
+        }
+
+        xVppLabel.setText(String.format("X: %.3f Vpp", maxX - minX));
+        yVppLabel.setText(String.format("Y: %.3f Vpp", maxY - minY));
+
+        // Auto-scale
+        if (autoScale && minX < maxX && minY < maxY) {
+            double rangeX = maxX - minX;
+            double marginX = rangeX * 0.1;
+            double rangeY = maxY - minY;
+            double marginY = rangeY * 0.1;
+
+            if (acCoupling) {
+                double absX = Math.max(Math.abs(minX - marginX), Math.abs(maxX + marginX));
+                scaleMinX = -absX;
+                scaleMaxX = absX;
+                double absY = Math.max(Math.abs(minY - marginY), Math.abs(maxY + marginY));
+                scaleMinY = -absY;
+                scaleMaxY = absY;
+            } else {
+                scaleMinX = Math.max(0, minX - marginX);
+                scaleMaxX = Math.min(VREF, maxX + marginX);
+                scaleMinY = Math.max(0, minY - marginY);
+                scaleMaxY = Math.min(VREF, maxY + marginY);
+            }
+        }
+
+        // Persistence: accumulate points
+        if (persistence) {
+            for (int i = 0; i < len; i++) {
+                persistenceBuffer.add(new double[]{vx[i], vy[i]});
+            }
+            while (persistenceBuffer.size() > MAX_PERSIST_POINTS) {
+                persistenceBuffer.remove(0);
+            }
+        }
+
+        drawXYPlot(vx, vy, len);
+    }
+
+    /**
      * Find one complete sine cycle using rising zero-crossings on the given AC-coupled signal.
      * Uses median period from all crossings to reject noise and pick a clean cycle.
      * @return int[]{startIndex, endIndex} or null if no full cycle found
@@ -558,12 +654,13 @@ public class HysteresisLoopApp extends Application {
             timer.stop();
             timer = null;
         }
+        if (contCoherentThread != null) {
+            contCoherentThread.interrupt();
+            contCoherentThread = null;
+        }
         if (intervalThread != null) {
             intervalThread.interrupt();
             intervalThread = null;
-        }
-        if (controller != null && !intervalMode) {
-            controller.stopContinuousSampling();
         }
         statusLabel.setText("● Stopped");
         statusLabel.setTextFill(Color.RED);
@@ -678,6 +775,7 @@ public class HysteresisLoopApp extends Application {
                 scaleMinY = 0; scaleMaxY = VREF;
             }
         }
+        saveConfig();
     }
 
     private void toggleAutoScale() {
@@ -694,6 +792,7 @@ public class HysteresisLoopApp extends Application {
                 scaleMinY = 0; scaleMaxY = VREF;
             }
         }
+        saveConfig();
     }
 
     private void togglePersistence() {
@@ -704,6 +803,7 @@ public class HysteresisLoopApp extends Application {
             persistButton.setStyle("-fx-background-color: #666666; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 10;");
             persistenceBuffer.clear();
         }
+        saveConfig();
     }
 
     private void clearDisplay() {
@@ -725,6 +825,7 @@ public class HysteresisLoopApp extends Application {
             intervalControls.setVisible(false);
             intervalControls.setManaged(false);
         }
+        saveConfig();
     }
 
     private void selectInterval(int seconds) {
@@ -738,6 +839,7 @@ public class HysteresisLoopApp extends Application {
                 : "-fx-background-color: #444444; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 5 10;");
         }
         pauseBtn.setStyle("-fx-background-color: #444444; -fx-text-fill: white; -fx-font-size: 12px; -fx-font-weight: bold; -fx-padding: 5 10;");
+        saveConfig();
     }
 
     private void selectPause() {
@@ -749,7 +851,54 @@ public class HysteresisLoopApp extends Application {
         pauseBtn.setStyle("-fx-background-color: #ff9800; -fx-text-fill: white; -fx-font-size: 12px; -fx-font-weight: bold; -fx-padding: 5 10;");
     }
 
+    private void loadConfig() {
+        // Channels
+        int chX = ConfigPersistence.getInt("hl.chX", 1);
+        xChannelSelect.setValue("CH" + chX);
+
+        int chY = ConfigPersistence.getInt("hl.chY", 2);
+        yChannelSelect.setValue("CH" + chY);
+
+        // Toggles
+        acCoupling = ConfigPersistence.getBool("hl.ac", true);
+        acButton.setStyle(acCoupling
+            ? "-fx-background-color: #9c27b0; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 10;"
+            : "-fx-background-color: #666666; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 10;");
+
+        autoScale = ConfigPersistence.getBool("hl.auto", true);
+        autoScaleButton.setStyle(autoScale
+            ? "-fx-background-color: #ff9800; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 10;"
+            : "-fx-background-color: #666666; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 10;");
+
+        persistence = ConfigPersistence.getBool("hl.persist", false);
+        persistButton.setStyle(persistence
+            ? "-fx-background-color: #ff9800; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 10;"
+            : "-fx-background-color: #666666; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 10;");
+
+        // Mode
+        boolean savedInterval = ConfigPersistence.getBool("hl.interval", false);
+        if (savedInterval != intervalMode) {
+            setMode(savedInterval);
+        }
+
+        // Interval seconds
+        intervalSeconds = ConfigPersistence.getInt("hl.intervalSec", 5);
+        selectInterval(intervalSeconds);
+    }
+
+    private void saveConfig() {
+        ConfigPersistence.put("hl.chX", selectedChannelX);
+        ConfigPersistence.put("hl.chY", selectedChannelY);
+        ConfigPersistence.put("hl.ac", acCoupling);
+        ConfigPersistence.put("hl.auto", autoScale);
+        ConfigPersistence.put("hl.persist", persistence);
+        ConfigPersistence.put("hl.interval", intervalMode);
+        ConfigPersistence.put("hl.intervalSec", intervalSeconds);
+        ConfigPersistence.save();
+    }
+
     private void shutdown() {
+        saveConfig();
         controller = null;
     }
 

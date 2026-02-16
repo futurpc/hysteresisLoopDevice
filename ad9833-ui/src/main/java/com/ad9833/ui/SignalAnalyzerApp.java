@@ -45,12 +45,12 @@ public class SignalAnalyzerApp extends Application {
 
     private AnimationTimer timer;
     private boolean isRunning = false;
-    private int selectedChannel = 1;  // Default to CH1 (CH0 may have connection issues)
+    private int selectedChannel = 3;  // Default to CH3
     private int selectedChannel2 = 2; // Default to CH2
     private boolean dualChannel = true; // false when CH2 is OFF
 
-    // Waveform buffer
-    private static final int BUFFER_SIZE = 400;
+    // Waveform buffer (6000 = 3 periods of 2000 coherent points)
+    private static final int BUFFER_SIZE = 6000;
     private int samplesPerFrame = 1000;  // Batch sample count - max by default
     private double[] buffer = new double[BUFFER_SIZE];
     private double[] buffer2 = new double[BUFFER_SIZE];
@@ -86,8 +86,9 @@ public class SignalAnalyzerApp extends Application {
     private Button modeContButton;
     private Button modeIntervalButton;
 
-    // Interval mode
-    private int intervalSamples = 2000;
+    // Interval mode (coherent averaging)
+    private int intervalRawSamples = 10000;  // raw samples to capture
+    private static final int COHERENT_TARGET_POINTS = 2000;  // output points per period
     private volatile int intervalSeconds = 5;
     private volatile boolean intervalPaused = false;
     private Thread intervalThread;
@@ -98,6 +99,11 @@ public class SignalAnalyzerApp extends Application {
     private Button exportBtn;
     private volatile int[] lastRawSamples;
     private volatile int[] lastRawSamples2;
+
+    // Continuous coherent mode
+    private Thread contCoherentThread;
+    private volatile MCP3208Controller.CoherentResult latestCoherentSingle;
+    private volatile MCP3208Controller.CoherentResult[] latestCoherentDual;
 
     /**
      * Called from MainMenuApp to start with a back button
@@ -184,7 +190,7 @@ public class SignalAnalyzerApp extends Application {
         for (int i = 0; i < 8; i++) {
             channelSelect.getItems().add("CH" + i);
         }
-        channelSelect.setValue("CH1");
+        channelSelect.setValue("CH3");
         channelSelect.setStyle("-fx-font-size: 11px;");
         channelSelect.setPrefWidth(70);
         channelSelect.setOnAction(e -> {
@@ -194,6 +200,7 @@ public class SignalAnalyzerApp extends Application {
                 controller.setSamplerChannels(selectedChannel, selectedChannel2);
             }
             clearBuffer();
+            saveConfig();
         });
 
         Label ch2Label = new Label("2:");
@@ -220,6 +227,7 @@ public class SignalAnalyzerApp extends Application {
                 }
             }
             clearBuffer();
+            saveConfig();
         });
 
         // Stack channel selectors vertically
@@ -332,20 +340,20 @@ public class SignalAnalyzerApp extends Application {
         pauseBtn.setStyle("-fx-background-color: #444444; -fx-text-fill: white; -fx-font-size: 14px; -fx-font-weight: bold; -fx-padding: 6 14;");
         pauseBtn.setOnAction(ev -> selectPause());
 
-        Label intSamplesLabel = new Label("Smp:");
+        Label intSamplesLabel = new Label("Raw:");
         intSamplesLabel.setTextFill(Color.WHITE);
         intSamplesLabel.setFont(Font.font("System", 12));
 
-        Label intSamplesValue = new Label("2000");
+        Label intSamplesValue = new Label("10000");
         intSamplesValue.setTextFill(Color.web("#00aaff"));
         intSamplesValue.setFont(Font.font("Monospace", FontWeight.BOLD, 12));
 
-        Slider intSamplesSlider = new Slider(500, 5000, 2000);
+        Slider intSamplesSlider = new Slider(5000, 10000, 10000);
         intSamplesSlider.setPrefWidth(100);
-        intSamplesSlider.setMajorTickUnit(1000);
+        intSamplesSlider.setMajorTickUnit(2500);
         intSamplesSlider.valueProperty().addListener((obs, oldVal, newVal) -> {
-            intervalSamples = newVal.intValue();
-            intSamplesValue.setText(String.valueOf(intervalSamples));
+            intervalRawSamples = newVal.intValue();
+            intSamplesValue.setText(String.valueOf(intervalRawSamples));
         });
 
         exportBtn = new Button("CSV");
@@ -376,8 +384,9 @@ public class SignalAnalyzerApp extends Application {
         });
         primaryStage.show();
 
-        // Initialize controller
+        // Initialize controller and load saved settings
         initController();
+        loadConfig();
     }
 
     private void initController() {
@@ -400,8 +409,6 @@ public class SignalAnalyzerApp extends Application {
         stopButton.setDisable(false);
         channelSelect.setDisable(true);
         channelSelect2.setDisable(true);
-        modeContButton.setDisable(true);
-        modeIntervalButton.setDisable(true);
 
         if (intervalMode) {
             statusLabel.setText("● Interval");
@@ -415,32 +422,56 @@ public class SignalAnalyzerApp extends Application {
     }
 
     private void startContinuousSampling() {
-        if (dualChannel) {
-            controller.startDualContinuousSampling(selectedChannel, selectedChannel2, samplesPerFrame);
-        } else {
-            controller.startContinuousSampling(selectedChannel, samplesPerFrame);
-        }
+        latestCoherentSingle = null;
+        latestCoherentDual = null;
 
+        // Background thread: continuously calls sampleCoherent (~200-500ms per call)
+        contCoherentThread = new Thread(() -> {
+            while (isRunning && !Thread.currentThread().isInterrupted()) {
+                try {
+                    if (dualChannel) {
+                        MCP3208Controller.CoherentResult[] cr = controller.sampleCoherentDual(
+                                selectedChannel, selectedChannel2,
+                                COHERENT_TARGET_POINTS, intervalRawSamples);
+                        latestCoherentDual = cr;
+                    } else {
+                        MCP3208Controller.CoherentResult cr = controller.sampleCoherent(
+                                selectedChannel, COHERENT_TARGET_POINTS, intervalRawSamples);
+                        latestCoherentSingle = cr;
+                    }
+                } catch (InterruptedException e) {
+                    break;
+                } catch (Exception e) {
+                    try { Thread.sleep(500); } catch (InterruptedException ie) { break; }
+                }
+            }
+        }, "cont-coherent-sampler");
+        contCoherentThread.setDaemon(true);
+        contCoherentThread.start();
+
+        // AnimationTimer polls for new results
         timer = new AnimationTimer() {
-            private long lastUpdate = 0;
+            private Object lastDisplayedRef = null;
 
             @Override
             public void handle(long now) {
-                // Update at ~30Hz
-                if (now - lastUpdate >= 33_000_000) {  // ~30fps
-                    lastUpdate = now;
-                    if (dualChannel) {
-                        int[] samplesX = controller.getLatestSamplesX();
-                        int[] samplesY = controller.getLatestSamplesY();
-                        if (samplesX == null || samplesX.length == 0 || samplesX == lastProcessedSamples) return;
-                        lastProcessedSamples = samplesX;
-                        int[] samplesY2 = (samplesY != null && samplesY.length == samplesX.length) ? samplesY : new int[samplesX.length];
-                        processAndDisplaySamples(samplesX, samplesY2);
-                    } else {
-                        int[] samples = controller.getLatestSamples();
-                        if (samples == null || samples.length == 0 || samples == lastProcessedSamples) return;
-                        lastProcessedSamples = samples;
-                        processAndDisplaySamples(samples, null);
+                if (dualChannel) {
+                    MCP3208Controller.CoherentResult[] cr = latestCoherentDual;
+                    if (cr == null || cr == lastDisplayedRef) return;
+                    lastDisplayedRef = cr;
+                    if (cr[0].cyclesAveraged > 0) {
+                        processAndDisplayCoherent(
+                                cr[0].averagedValues, cr[1].averagedValues,
+                                cr[0].frequencyHz, cr[0].cyclesAveraged);
+                    }
+                } else {
+                    MCP3208Controller.CoherentResult cr = latestCoherentSingle;
+                    if (cr == null || cr == lastDisplayedRef) return;
+                    lastDisplayedRef = cr;
+                    if (cr.cyclesAveraged > 0) {
+                        processAndDisplayCoherent(
+                                cr.averagedValues, null,
+                                cr.frequencyHz, cr.cyclesAveraged);
                     }
                 }
             }
@@ -453,19 +484,43 @@ public class SignalAnalyzerApp extends Application {
         intervalThread = new Thread(() -> {
             while (isRunning) {
                 try {
-                    int[] samplesX;
-                    int[] samplesY;
+                    // Try coherent averaging first, fall back to legacy
+                    boolean usedCoherent = false;
                     if (dualChannel) {
-                        int[][] xy = controller.sampleFastDualChannel(selectedChannel, selectedChannel2, intervalSamples);
-                        samplesX = xy[0];
-                        samplesY = xy[1];
+                        try {
+                            MCP3208Controller.CoherentResult[] cr = controller.sampleCoherentDual(
+                                    selectedChannel, selectedChannel2,
+                                    COHERENT_TARGET_POINTS, intervalRawSamples);
+                            if (cr != null && cr[0].cyclesAveraged > 0) {
+                                usedCoherent = true;
+                                Platform.runLater(() -> processAndDisplayCoherent(
+                                        cr[0].averagedValues, cr[1].averagedValues,
+                                        cr[0].frequencyHz, cr[0].cyclesAveraged));
+                            }
+                        } catch (IllegalStateException e) {
+                            // No native helper — fall through to legacy
+                        }
+                        if (!usedCoherent) {
+                            int[][] xy = controller.sampleFastDualChannel(selectedChannel, selectedChannel2, intervalRawSamples);
+                            Platform.runLater(() -> processAndDisplaySamples(xy[0], xy[1]));
+                        }
                     } else {
-                        samplesX = controller.sampleFast(selectedChannel, intervalSamples);
-                        samplesY = null;
-                    }
-
-                    if (samplesX.length > 0) {
-                        Platform.runLater(() -> processAndDisplaySamples(samplesX, samplesY));
+                        try {
+                            MCP3208Controller.CoherentResult cr = controller.sampleCoherent(
+                                    selectedChannel, COHERENT_TARGET_POINTS, intervalRawSamples);
+                            if (cr != null && cr.cyclesAveraged > 0) {
+                                usedCoherent = true;
+                                Platform.runLater(() -> processAndDisplayCoherent(
+                                        cr.averagedValues, null,
+                                        cr.frequencyHz, cr.cyclesAveraged));
+                            }
+                        } catch (IllegalStateException e) {
+                            // No native helper — fall through to legacy
+                        }
+                        if (!usedCoherent) {
+                            int[] raw = controller.sampleFast(selectedChannel, intervalRawSamples);
+                            Platform.runLater(() -> processAndDisplaySamples(raw, null));
+                        }
                     }
 
                     // Wait for interval or pause
@@ -608,6 +663,40 @@ public class SignalAnalyzerApp extends Application {
     }
 
     /**
+     * Process coherent-averaged data: the samples array IS one period (2000 points).
+     * No trigger search or cycle extraction needed.
+     */
+    private void processAndDisplayCoherent(int[] samples, int[] samples2, double freq, int cycles) {
+        lastRawSamples = samples;
+        lastRawSamples2 = samples2;
+
+        boolean hasCh2 = dualChannel && samples2 != null && samples2.length > 0;
+
+        // Tile 3 periods into buffer for zoom-out view
+        int period = samples.length;
+        int total = Math.min(BUFFER_SIZE, period * 3);
+        for (int i = 0; i < total; i++) {
+            buffer[i] = (samples[i % period] * 3.3) / 4095.0;
+        }
+        bufferIndex = total;
+
+        if (hasCh2) {
+            int period2 = samples2.length;
+            int total2 = Math.min(BUFFER_SIZE, period2 * 3);
+            for (int i = 0; i < total2; i++) {
+                buffer2[i] = (samples2[i % period2] * 3.3) / 4095.0;
+            }
+            bufferIndex2 = total2;
+        }
+
+        // Update frequency label with cycle count
+        smoothedFreq = freq;
+        freqLabel.setText(formatFreq(freq) + " (" + cycles + " cycles)");
+
+        updateDisplay();
+    }
+
+    /**
      * Find one complete sine cycle using rising zero-crossings.
      * Uses median period from all crossings to reject noise.
      */
@@ -650,12 +739,13 @@ public class SignalAnalyzerApp extends Application {
             timer.stop();
             timer = null;
         }
+        if (contCoherentThread != null) {
+            contCoherentThread.interrupt();
+            contCoherentThread = null;
+        }
         if (intervalThread != null) {
             intervalThread.interrupt();
             intervalThread = null;
-        }
-        if (controller != null) {
-            controller.stopContinuousSampling();
         }
         statusLabel.setText("● Stopped");
         statusLabel.setTextFill(Color.RED);
@@ -663,8 +753,6 @@ public class SignalAnalyzerApp extends Application {
         stopButton.setDisable(true);
         channelSelect.setDisable(false);
         channelSelect2.setDisable(false);
-        modeContButton.setDisable(false);
-        modeIntervalButton.setDisable(false);
     }
 
     private void addToBuffer(double voltage) {
@@ -796,14 +884,15 @@ public class SignalAnalyzerApp extends Application {
         // Buffer is pre-aligned to trigger in AnimationTimer — no re-search needed
         int startOffset = 0;
 
-        // Calculate how many samples to display
-        // In interval mode, use only the valid cycle samples (stored in bufferIndex)
+        // Calculate how many valid samples are in the buffer
+        int validCount = (bufferIndex > 0 && bufferIndex < BUFFER_SIZE) ? bufferIndex : BUFFER_SIZE;
         int displaySamples;
-        if (intervalMode && bufferIndex > 0 && bufferIndex < BUFFER_SIZE) {
-            displaySamples = bufferIndex;
+        if (intervalMode) {
+            displaySamples = validCount;  // show entire period
         } else {
-            displaySamples = (BUFFER_SIZE * zoomPercent) / 100;
+            displaySamples = Math.min(validCount, (validCount * zoomPercent) / 100);
         }
+        if (displaySamples < 2) displaySamples = 2;
 
         // Sub-sample X offset from trigger interpolation (computed during pre-alignment)
         double pixelsPerSample = w / displaySamples;
@@ -912,6 +1001,7 @@ public class SignalAnalyzerApp extends Application {
             scaleMin = 0.0;
             scaleMax = 3.3;
         }
+        saveConfig();
     }
 
     private void toggleTrigger() {
@@ -923,6 +1013,7 @@ public class SignalAnalyzerApp extends Application {
             triggerButton.setStyle("-fx-background-color: #666666; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 12;");
             triggerButton.setText("TRIG");
         }
+        saveConfig();
     }
 
     private void toggleAcCoupling() {
@@ -932,6 +1023,7 @@ public class SignalAnalyzerApp extends Application {
         } else {
             acButton.setStyle("-fx-background-color: #666666; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 12;");
         }
+        saveConfig();
     }
 
     private void updateDcOffset() {
@@ -941,7 +1033,7 @@ public class SignalAnalyzerApp extends Application {
             return;
         }
         // Calculate average (DC component) of valid buffer samples — independently per channel
-        int validSamples = (intervalMode && bufferIndex > 0 && bufferIndex < BUFFER_SIZE) ? bufferIndex : BUFFER_SIZE;
+        int validSamples = (bufferIndex > 0 && bufferIndex < BUFFER_SIZE) ? bufferIndex : BUFFER_SIZE;
         double sum = 0;
         for (int i = 0; i < validSamples; i++) {
             sum += buffer[i];
@@ -949,7 +1041,7 @@ public class SignalAnalyzerApp extends Application {
         dcOffset = sum / validSamples;
 
         if (dualChannel) {
-            int validSamples2 = (intervalMode && bufferIndex2 > 0 && bufferIndex2 < BUFFER_SIZE) ? bufferIndex2 : BUFFER_SIZE;
+            int validSamples2 = (bufferIndex2 > 0 && bufferIndex2 < BUFFER_SIZE) ? bufferIndex2 : BUFFER_SIZE;
             double sum2 = 0;
             for (int i = 0; i < validSamples2; i++) {
                 sum2 += buffer2[i];
@@ -1007,7 +1099,7 @@ public class SignalAnalyzerApp extends Application {
         double max = Double.MIN_VALUE;
 
         // Use min/max from BOTH channels so they share the same Y axis
-        int validSamples = (intervalMode && bufferIndex > 0 && bufferIndex < BUFFER_SIZE) ? bufferIndex : BUFFER_SIZE;
+        int validSamples = (bufferIndex > 0 && bufferIndex < BUFFER_SIZE) ? bufferIndex : BUFFER_SIZE;
         for (int i = 0; i < validSamples; i++) {
             double adjusted = buffer[i] - dcOffset;
             if (adjusted < min) min = adjusted;
@@ -1015,7 +1107,7 @@ public class SignalAnalyzerApp extends Application {
         }
 
         if (dualChannel) {
-            int validSamples2 = (intervalMode && bufferIndex2 > 0 && bufferIndex2 < BUFFER_SIZE) ? bufferIndex2 : BUFFER_SIZE;
+            int validSamples2 = (bufferIndex2 > 0 && bufferIndex2 < BUFFER_SIZE) ? bufferIndex2 : BUFFER_SIZE;
             for (int i = 0; i < validSamples2; i++) {
                 double adjusted2 = buffer2[i] - dcOffset2;
                 if (adjusted2 < min) min = adjusted2;
@@ -1047,7 +1139,10 @@ public class SignalAnalyzerApp extends Application {
     }
 
     private void setMode(boolean interval) {
-        if (isRunning) return;
+        boolean wasRunning = isRunning;
+        if (wasRunning) {
+            stopSampling();
+        }
         intervalMode = interval;
         if (intervalMode) {
             modeContButton.setStyle("-fx-background-color: #666666; -fx-text-fill: white; -fx-font-size: 12px; -fx-font-weight: bold; -fx-padding: 6 8;");
@@ -1064,6 +1159,10 @@ public class SignalAnalyzerApp extends Application {
             intervalRow.setVisible(false);
             intervalRow.setManaged(false);
         }
+        saveConfig();
+        if (wasRunning) {
+            startSampling();
+        }
     }
 
     private void selectInterval(int seconds) {
@@ -1076,6 +1175,7 @@ public class SignalAnalyzerApp extends Application {
                 : "-fx-background-color: #444444; -fx-text-fill: white; -fx-font-size: 14px; -fx-padding: 6 14;");
         }
         pauseBtn.setStyle("-fx-background-color: #444444; -fx-text-fill: white; -fx-font-size: 14px; -fx-font-weight: bold; -fx-padding: 6 14;");
+        saveConfig();
     }
 
     private void selectPause() {
@@ -1125,7 +1225,59 @@ public class SignalAnalyzerApp extends Application {
         }
     }
 
+    private void loadConfig() {
+        // Channel 1
+        int ch1 = ConfigPersistence.getInt("sa.ch1", 3);
+        channelSelect.setValue("CH" + ch1);
+
+        // Channel 2
+        String ch2 = ConfigPersistence.get("sa.ch2", "CH2");
+        channelSelect2.setValue(ch2);
+        dualChannel = !"OFF".equals(ch2);
+        if (dualChannel) {
+            try { selectedChannel2 = Integer.parseInt(ch2.substring(2)); } catch (Exception ignored) {}
+        }
+
+        // Toggles
+        acCoupling = ConfigPersistence.getBool("sa.ac", true);
+        acButton.setStyle(acCoupling
+            ? "-fx-background-color: #9c27b0; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 12;"
+            : "-fx-background-color: #666666; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 12;");
+
+        autoScale = ConfigPersistence.getBool("sa.auto", true);
+        autoScaleButton.setStyle(autoScale
+            ? "-fx-background-color: #ff9800; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 12;"
+            : "-fx-background-color: #666666; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 12;");
+
+        triggerEnabled = ConfigPersistence.getBool("sa.trig", true);
+        triggerButton.setStyle(triggerEnabled
+            ? "-fx-background-color: #ff9800; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 12;"
+            : "-fx-background-color: #666666; -fx-text-fill: white; -fx-font-size: 12px; -fx-padding: 6 12;");
+
+        // Mode
+        boolean savedInterval = ConfigPersistence.getBool("sa.interval", false);
+        if (savedInterval != intervalMode) {
+            setMode(savedInterval);
+        }
+
+        // Interval seconds
+        intervalSeconds = ConfigPersistence.getInt("sa.intervalSec", 5);
+        selectInterval(intervalSeconds);
+    }
+
+    private void saveConfig() {
+        ConfigPersistence.put("sa.ch1", selectedChannel);
+        ConfigPersistence.put("sa.ch2", dualChannel ? "CH" + selectedChannel2 : "OFF");
+        ConfigPersistence.put("sa.ac", acCoupling);
+        ConfigPersistence.put("sa.auto", autoScale);
+        ConfigPersistence.put("sa.trig", triggerEnabled);
+        ConfigPersistence.put("sa.interval", intervalMode);
+        ConfigPersistence.put("sa.intervalSec", intervalSeconds);
+        ConfigPersistence.save();
+    }
+
     private void shutdown() {
+        saveConfig();
         // Don't close the shared controller — other consumers may still use it
         controller = null;
     }

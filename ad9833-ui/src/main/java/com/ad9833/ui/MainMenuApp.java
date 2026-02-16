@@ -215,8 +215,8 @@ public class MainMenuApp extends Application {
         box.setAlignment(Pos.CENTER);
         box.setPadding(new Insets(5));
 
-        String ip = getLocalIp();
-        if (ip == null) {
+        String host = getHostAlias();
+        if (host == null) {
             Label noIp = new Label("No network");
             noIp.setTextFill(Color.web("#888899"));
             noIp.setFont(Font.font("System", 12));
@@ -224,7 +224,7 @@ public class MainMenuApp extends Application {
             return box;
         }
 
-        String url = "http://" + ip + ":" + WEB_PORT;
+        String url = "http://" + host + ":" + WEB_PORT;
 
         // Generate QR code on canvas
         Canvas qrCanvas = new Canvas(140, 140);
@@ -240,6 +240,18 @@ public class MainMenuApp extends Application {
 
         box.getChildren().addAll(qrCanvas, urlLabel, scanLabel);
         return box;
+    }
+
+    private String getHostAlias() {
+        // Use system hostname + .local (mDNS) — dynamically reflects hostname changes
+        try {
+            String hostname = InetAddress.getLocalHost().getHostName();
+            if (hostname != null && !hostname.isEmpty() && !hostname.equals("localhost")) {
+                return hostname.endsWith(".local") ? hostname : hostname + ".local";
+            }
+        } catch (Exception ignored) {}
+        // Fallback to IP if hostname unavailable
+        return getLocalIp();
     }
 
     private void drawQrCode(Canvas canvas, String text) {

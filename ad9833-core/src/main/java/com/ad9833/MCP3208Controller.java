@@ -22,6 +22,22 @@ public class MCP3208Controller implements AutoCloseable {
     private static final double VREF = 3.3;  // Reference voltage
     private static final int MAX_VALUE = 4095;  // 12-bit ADC (0-4095)
 
+    /** Result of coherent averaging: one period reconstructed from many cycles. */
+    public static class CoherentResult {
+        public final int[] averagedValues;    // targetPoints integers, 0-4095
+        public final double periodSeconds;
+        public final double frequencyHz;
+        public final int cyclesAveraged;
+
+        public CoherentResult(int[] averagedValues, double periodSeconds,
+                              double frequencyHz, int cyclesAveraged) {
+            this.averagedValues = averagedValues;
+            this.periodSeconds = periodSeconds;
+            this.frequencyHz = frequencyHz;
+            this.cyclesAveraged = cyclesAveraged;
+        }
+    }
+
     private final boolean verbose;
     private boolean initialized = false;
     private volatile double lastSampleDurationSeconds = 0;
@@ -288,6 +304,101 @@ public class MCP3208Controller implements AutoCloseable {
             log("Batch sample error: %s", e.getMessage());
         }
         return new int[0];
+    }
+
+    /**
+     * Coherent averaging: capture rawSamples, fold onto one period, return targetPoints averaged values.
+     * Requires native C helper.
+     * @param channel Channel to sample (0-7)
+     * @param targetPoints Number of output points per period (e.g. 2000)
+     * @param rawSamples Number of raw samples to capture (e.g. 10000)
+     * @return CoherentResult, or null if detection fails
+     */
+    public CoherentResult sampleCoherent(int channel, int targetPoints, int rawSamples) throws Exception {
+        if (!initialized) throw new IllegalStateException("MCP3208 not initialized");
+        if (!hasNativeHelper) throw new IllegalStateException("Native helper required for coherent mode");
+
+        String helper = System.getProperty("user.home") + "/adc_sample";
+        ProcessBuilder pb = new ProcessBuilder(helper,
+                String.valueOf(channel), String.valueOf(rawSamples),
+                "coherent", String.valueOf(targetPoints));
+        pb.redirectErrorStream(false);
+        Process process = pb.start();
+
+        BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+        String valuesLine = reader.readLine();   // averaged values
+        String periodLine = reader.readLine();   // period seconds
+        String freqLine = reader.readLine();     // frequency Hz
+        String cyclesLine = reader.readLine();   // cycles averaged
+        process.waitFor();
+
+        if (valuesLine == null || valuesLine.isEmpty()) return null;
+
+        String[] parts = valuesLine.trim().split("\\s+");
+        int[] values = new int[parts.length];
+        for (int i = 0; i < parts.length; i++) {
+            values[i] = Integer.parseInt(parts[i]);
+        }
+
+        double period = 0, freq = 0;
+        int cycles = 0;
+        try { if (periodLine != null) period = Double.parseDouble(periodLine.trim()); } catch (NumberFormatException ignored) {}
+        try { if (freqLine != null) freq = Double.parseDouble(freqLine.trim()); } catch (NumberFormatException ignored) {}
+        try { if (cyclesLine != null) cycles = Integer.parseInt(cyclesLine.trim()); } catch (NumberFormatException ignored) {}
+
+        lastMeasuredFrequency = freq;
+        return new CoherentResult(values, period, freq, cycles);
+    }
+
+    /**
+     * Dual-channel coherent averaging: capture both channels interleaved,
+     * use CH1 for period detection, fold both onto one period.
+     * @return CoherentResult[2] where [0]=CH1, [1]=CH2 (same period/freq/cycles)
+     */
+    public CoherentResult[] sampleCoherentDual(int ch1, int ch2, int targetPoints, int rawSamples) throws Exception {
+        if (!initialized) throw new IllegalStateException("MCP3208 not initialized");
+        if (!hasNativeHelper) throw new IllegalStateException("Native helper required for coherent mode");
+
+        String helper = System.getProperty("user.home") + "/adc_sample";
+        ProcessBuilder pb = new ProcessBuilder(helper,
+                String.valueOf(ch1), String.valueOf(rawSamples),
+                "coherent", String.valueOf(targetPoints), String.valueOf(ch2));
+        pb.redirectErrorStream(false);
+        Process process = pb.start();
+
+        BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+        String ch1Line = reader.readLine();     // CH1 averaged values
+        String ch2Line = reader.readLine();     // CH2 averaged values
+        String periodLine = reader.readLine();  // period seconds
+        String freqLine = reader.readLine();    // frequency Hz
+        String cyclesLine = reader.readLine();  // cycles averaged
+        process.waitFor();
+
+        if (ch1Line == null || ch1Line.isEmpty()) return null;
+
+        int[] values1 = parseIntLine(ch1Line);
+        int[] values2 = (ch2Line != null && !ch2Line.isEmpty()) ? parseIntLine(ch2Line) : new int[0];
+
+        double period = 0, freq = 0;
+        int cycles = 0;
+        try { if (periodLine != null) period = Double.parseDouble(periodLine.trim()); } catch (NumberFormatException ignored) {}
+        try { if (freqLine != null) freq = Double.parseDouble(freqLine.trim()); } catch (NumberFormatException ignored) {}
+        try { if (cyclesLine != null) cycles = Integer.parseInt(cyclesLine.trim()); } catch (NumberFormatException ignored) {}
+
+        lastMeasuredFrequency = freq;
+        return new CoherentResult[] {
+            new CoherentResult(values1, period, freq, cycles),
+            new CoherentResult(values2, period, freq, cycles)
+        };
+    }
+
+    private int[] parseIntLine(String line) {
+        String[] parts = line.trim().split("\\s+");
+        int[] values = new int[parts.length];
+        for (int i = 0; i < parts.length; i++) {
+            values[i] = Integer.parseInt(parts[i]);
+        }
+        return values;
     }
 
     /**
