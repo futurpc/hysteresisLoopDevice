@@ -311,6 +311,115 @@ To reinstall: `~/splash/setup-splash.sh`
 - Input Range: 0 to VREF (3.3V)
 - Sample Rate: ~100 ksps max
 
+## Coherent Averaging & Hysteresis Loop Algorithm
+
+The device constructs clean hysteresis loops (B-H curves) from noisy ADC data using a coherent averaging algorithm implemented in C (`native/adc_coherent.c`). The pipeline transforms ~10,000 raw 12-bit samples into a smooth, single-period waveform for each channel, then plots them as an X-Y parametric curve.
+
+### Pipeline Overview
+
+```
+Raw ADC samples  →  Period Detection  →  Phase Folding  →  Harmonic Fit  →  Evaluation  →  X-Y Plot
+  (10,000 pts)      (zero-crossings)     (φ ∈ [0,1))     (least squares)   (2,000 pts)    (B-H curve)
+```
+
+### Step 1: Raw ADC Sampling
+
+The MCP3208 is read via SPI at ~1.5 MHz. Each sample gets a high-resolution timestamp (`CLOCK_MONOTONIC`). For dual-channel (hysteresis loop), reads are interleaved: CH1, CH2, CH1, CH2, ... sharing the same timestamp array so both channels are phase-aligned.
+
+Typical capture: **10,000 samples** in ~200-500ms, covering 10-100+ cycles depending on signal frequency.
+
+### Step 2: Period Detection
+
+The signal is AC-coupled by subtracting its mean. Rising zero-crossings are found with **linear interpolation** between consecutive samples where `prev < 0` and `curr >= 0`:
+
+```
+t_crossing = t[i-1] + frac × (t[i] - t[i-1])
+where frac = -prev / (curr - prev)
+```
+
+The period is computed as the **span-based average** across all crossings:
+
+```
+T = (t_last_crossing - t_first_crossing) / (num_crossings - 1)
+```
+
+This is more accurate than pairwise averaging because it minimizes the effect of jitter on individual crossings.
+
+### Step 3: Phase Folding
+
+Each raw sample is assigned a **local phase** φ ∈ [0, 1) within its cycle:
+
+```
+φ_i = (t_i - t_cycle_start) / (t_cycle_end - t_cycle_start)
+```
+
+where `t_cycle_start` and `t_cycle_end` are the zero-crossings bounding sample `i`. This "folds" all cycles onto a single period, enabling coherent averaging across cycles.
+
+### Step 4: Clipping Detection
+
+Samples near the ADC floor (≤ 5) or ceiling (≥ 4090) are marked as **clipped** and excluded from the fit. The harmonic model naturally reconstructs these regions from the unclipped data.
+
+When clipping exceeds 2% of samples, the number of harmonics is reduced to K=1 (fundamental only) to prevent Gibbs-like oscillations in the gap.
+
+### Step 5: Harmonic Fit (Least Squares)
+
+A harmonic series model is fitted to all valid (non-clipped) samples:
+
+```
+y(φ) = a₀ + Σ [aₖ·sin(2πkφ) + bₖ·cos(2πkφ)]    for k = 1..K
+```
+
+**Number of harmonics K:**
+- No clipping: K = min(samples_per_cycle / 2 - 1, 12)
+- Clipping present (>2%): K = 1
+
+**Normal equations** are built by accumulating the Gram matrix `GᵀG` and right-hand side `Gᵀy` over all valid samples, where `G` is the matrix of basis functions evaluated at each sample's phase. Higher harmonics are computed efficiently via **Chebyshev recurrence**:
+
+```
+sin(kθ) = 2·cos(θ)·sin((k-1)θ) - sin((k-2)θ)
+cos(kθ) = 2·cos(θ)·cos((k-1)θ) - cos((k-2)θ)
+```
+
+The system `GᵀG · x = Gᵀy` (size M×M where M = 2K+1) is solved via **Gaussian elimination with partial pivoting**.
+
+### Step 6: Evaluation
+
+The fitted model is evaluated at **2,000 uniformly spaced phase points** (φ = 0/2000, 1/2000, ..., 1999/2000), producing a smooth, noise-free representation of one complete period.
+
+### Step 7: Phase Normalization
+
+The output is circularly rotated so it starts at the **rising zero-crossing** of the averaged waveform. This ensures consistent phase alignment across captures.
+
+### Step 8: Dual-Channel (Hysteresis Loop)
+
+For the hysteresis loop, two ADC channels are sampled simultaneously:
+- **CH1** (e.g., applied field H) provides the zero-crossings used for both channels
+- **CH2** (e.g., magnetic flux B) is fitted independently using CH1's phase references
+- Both channels share the same phase rotation (from CH1's zero-crossing)
+
+### Step 9: X-Y Display
+
+The two coherent-averaged channels are plotted as a parametric curve:
+- **X-axis**: CH_X(φ) — one channel's voltage across the period
+- **Y-axis**: CH_Y(φ) — the other channel's voltage
+- **AC coupling**: Mean is subtracted from each channel to center the loop
+- Since both arrays represent exactly one period with matched phase, the result is a clean **closed loop** — the hysteresis (B-H) curve
+
+### Algorithm Properties
+
+| Property | Value |
+|----------|-------|
+| Raw samples per capture | ~10,000 |
+| Output points per period | 2,000 |
+| Max harmonics (no clipping) | 12 |
+| Max harmonics (with clipping) | 1 (fundamental) |
+| Minimum cycles required | 3 (for zero-crossing detection) |
+| Update rate (continuous mode) | ~2-5 fps |
+| ADC resolution | 12-bit (0-4095) |
+| SPI speed | 1.5 MHz |
+
+---
+
 ## Troubleshooting
 
 **AD9833 - No output (0V):**

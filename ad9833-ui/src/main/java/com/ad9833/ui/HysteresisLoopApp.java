@@ -33,6 +33,9 @@ public class HysteresisLoopApp extends Application {
     private Label statusLabel;
     private Label xVppLabel;
     private Label yVppLabel;
+    private Label hcLabel;
+    private Label brLabel;
+    private Label bmaxLabel;
     private ComboBox<String> xChannelSelect;
     private ComboBox<String> yChannelSelect;
     private Button startButton;
@@ -292,14 +295,27 @@ public class HysteresisLoopApp extends Application {
 
         // Vpp labels
         xVppLabel = new Label("X: -- Vpp");
-        xVppLabel.setFont(Font.font("Monospace", FontWeight.BOLD, 16));
+        xVppLabel.setFont(Font.font("Monospace", FontWeight.BOLD, 14));
         xVppLabel.setTextFill(Color.web("#00ff88"));
 
         yVppLabel = new Label("Y: -- Vpp");
-        yVppLabel.setFont(Font.font("Monospace", FontWeight.BOLD, 16));
+        yVppLabel.setFont(Font.font("Monospace", FontWeight.BOLD, 14));
         yVppLabel.setTextFill(Color.web("#00ff88"));
 
-        controls.getChildren().addAll(chRow, modeRow, startStopRow, toggleRow, clearButton, intervalControls, xVppLabel, yVppLabel);
+        // Loop parameter labels
+        hcLabel = new Label("Hc: --");
+        hcLabel.setFont(Font.font("Monospace", FontWeight.BOLD, 14));
+        hcLabel.setTextFill(Color.web("#ffcc00"));
+
+        brLabel = new Label("Br: --");
+        brLabel.setFont(Font.font("Monospace", FontWeight.BOLD, 14));
+        brLabel.setTextFill(Color.web("#ff6699"));
+
+        bmaxLabel = new Label("Bmax: --");
+        bmaxLabel.setFont(Font.font("Monospace", FontWeight.BOLD, 14));
+        bmaxLabel.setTextFill(Color.web("#66ccff"));
+
+        controls.getChildren().addAll(chRow, modeRow, startStopRow, toggleRow, clearButton, intervalControls, xVppLabel, yVppLabel, hcLabel, brLabel, bmaxLabel);
         root.setRight(controls);
 
         Scene scene = new Scene(root, 800, 480);
@@ -525,6 +541,11 @@ public class HysteresisLoopApp extends Application {
         }
 
         drawXYPlot(cx, cy, cycleLen);
+
+        // Compute and display loop parameters
+        double[] loopParams = computeLoopParams(cx, cy, cycleLen);
+        updateLoopLabels(loopParams);
+        drawLoopMarkers(loopParams);
     }
 
     /**
@@ -601,6 +622,11 @@ public class HysteresisLoopApp extends Application {
         }
 
         drawXYPlot(vx, vy, len);
+
+        // Compute and display loop parameters
+        double[] loopParams = computeLoopParams(vx, vy, len);
+        updateLoopLabels(loopParams);
+        drawLoopMarkers(loopParams);
     }
 
     /**
@@ -703,6 +729,160 @@ public class HysteresisLoopApp extends Application {
         gc.fillText(String.format("%.2fV", scaleMaxX), w - 55, h - 4);
         gc.fillText(String.format("Y:%.2fV", scaleMaxY), 5, 12);
         gc.fillText(String.format("%.2fV", scaleMinY), 5, h - 16);
+    }
+
+    /**
+     * Compute Hc (coercivity), Br (remanence) and Bmax from the X-Y loop.
+     * Hc = X values where Y crosses zero (X-axis interception).
+     * Br = Y values where X crosses zero (Y-axis interception).
+     * Bmax = maximum absolute Y value.
+     * Returns double[]{hc, br, bmax, hcX1, hcY1, hcX2, hcY2, brX1, brY1, brX2, brY2, bmaxX, bmaxY}
+     */
+    private double[] computeLoopParams(double[] vx, double[] vy, int len) {
+        // Hc: find where Y crosses zero, interpolate X value
+        double hcPos = Double.NaN, hcNeg = Double.NaN;
+        double hcPosX = 0, hcNegX = 0;
+        for (int i = 1; i < len; i++) {
+            if (vy[i - 1] < 0 && vy[i] >= 0) {
+                // Rising zero crossing of Y → positive Hc
+                double frac = -vy[i - 1] / (vy[i] - vy[i - 1]);
+                hcPos = vx[i - 1] + frac * (vx[i] - vx[i - 1]);
+                hcPosX = hcPos;
+            } else if (vy[i - 1] >= 0 && vy[i] < 0) {
+                // Falling zero crossing of Y → negative Hc
+                double frac = vy[i - 1] / (vy[i - 1] - vy[i]);
+                hcNeg = vx[i - 1] + frac * (vx[i] - vx[i - 1]);
+                hcNegX = hcNeg;
+            }
+        }
+
+        // Br: find where X crosses zero, interpolate Y value
+        double brPos = Double.NaN, brNeg = Double.NaN;
+        double brPosY = 0, brNegY = 0;
+        for (int i = 1; i < len; i++) {
+            if (vx[i - 1] < 0 && vx[i] >= 0) {
+                // Rising zero crossing of X
+                double frac = -vx[i - 1] / (vx[i] - vx[i - 1]);
+                brPos = vy[i - 1] + frac * (vy[i] - vy[i - 1]);
+                brPosY = brPos;
+            } else if (vx[i - 1] >= 0 && vx[i] < 0) {
+                // Falling zero crossing of X
+                double frac = vx[i - 1] / (vx[i - 1] - vx[i]);
+                brNeg = vy[i - 1] + frac * (vy[i] - vy[i - 1]);
+                brNegY = brNeg;
+            }
+        }
+
+        // Bmax: maximum positive Y value (top of the loop)
+        double bmax = -Double.MAX_VALUE;
+        double bmaxX = 0, bmaxY = 0;
+        for (int i = 0; i < len; i++) {
+            if (vy[i] > bmax) {
+                bmax = vy[i];
+                bmaxX = vx[i];
+                bmaxY = vy[i];
+            }
+        }
+
+        // Average Hc magnitude from both crossings
+        double hcVal;
+        if (!Double.isNaN(hcPos) && !Double.isNaN(hcNeg)) {
+            hcVal = (Math.abs(hcPos) + Math.abs(hcNeg)) / 2;
+        } else if (!Double.isNaN(hcPos)) {
+            hcVal = Math.abs(hcPos);
+        } else if (!Double.isNaN(hcNeg)) {
+            hcVal = Math.abs(hcNeg);
+        } else {
+            hcVal = Double.NaN;
+        }
+
+        // Average Br magnitude from both crossings
+        double brVal;
+        if (!Double.isNaN(brPos) && !Double.isNaN(brNeg)) {
+            brVal = (Math.abs(brPos) + Math.abs(brNeg)) / 2;
+        } else if (!Double.isNaN(brPos)) {
+            brVal = Math.abs(brPos);
+        } else if (!Double.isNaN(brNeg)) {
+            brVal = Math.abs(brNeg);
+        } else {
+            brVal = Double.NaN;
+        }
+
+        return new double[]{
+            hcVal, brVal, bmax,
+            Double.isNaN(hcPos) ? Double.NaN : hcPosX, 0,
+            Double.isNaN(hcNeg) ? Double.NaN : hcNegX, 0,
+            0, Double.isNaN(brPos) ? Double.NaN : brPosY,
+            0, Double.isNaN(brNeg) ? Double.NaN : brNegY,
+            bmaxX, bmaxY
+        };
+    }
+
+    private void updateLoopLabels(double[] params) {
+        double hc = params[0], br = params[1], bmax = params[2];
+        hcLabel.setText(Double.isNaN(hc) ? "Hc: --" : String.format("Hc: %.3f V", hc));
+        brLabel.setText(Double.isNaN(br) ? "Br: --" : String.format("Br: %.3f V", br));
+        bmaxLabel.setText(String.format("Bmax: %.3f V", bmax));
+    }
+
+    private void drawLoopMarkers(double[] params) {
+        double w = xyCanvas.getWidth();
+        double h = xyCanvas.getHeight();
+        double rangeX = scaleMaxX - scaleMinX;
+        double rangeY = scaleMaxY - scaleMinY;
+        if (rangeX <= 0 || rangeY <= 0) return;
+
+        double markerR = 5;
+
+        // Hc markers (yellow) - on X axis where Y=0
+        gc.setFill(Color.web("#ffcc00"));
+        gc.setStroke(Color.web("#ffcc00"));
+        gc.setLineWidth(1);
+        // Positive Hc
+        if (!Double.isNaN(params[3])) {
+            double px = ((params[3] - scaleMinX) / rangeX) * w;
+            double py = h - ((params[4] - scaleMinY) / rangeY) * h;
+            gc.strokeOval(px - markerR, py - markerR, markerR * 2, markerR * 2);
+            gc.setFont(Font.font("Monospace", FontWeight.BOLD, 10));
+            gc.fillText("Hc", px + 7, py - 3);
+        }
+        // Negative Hc
+        if (!Double.isNaN(params[5])) {
+            double px = ((params[5] - scaleMinX) / rangeX) * w;
+            double py = h - ((params[6] - scaleMinY) / rangeY) * h;
+            gc.strokeOval(px - markerR, py - markerR, markerR * 2, markerR * 2);
+            gc.setFont(Font.font("Monospace", FontWeight.BOLD, 10));
+            gc.fillText("Hc", px + 7, py - 3);
+        }
+
+        // Br markers (pink) - on Y axis where X=0
+        gc.setFill(Color.web("#ff6699"));
+        gc.setStroke(Color.web("#ff6699"));
+        // Positive Br
+        if (!Double.isNaN(params[8])) {
+            double px = ((params[7] - scaleMinX) / rangeX) * w;
+            double py = h - ((params[8] - scaleMinY) / rangeY) * h;
+            gc.strokeOval(px - markerR, py - markerR, markerR * 2, markerR * 2);
+            gc.setFont(Font.font("Monospace", FontWeight.BOLD, 10));
+            gc.fillText("Br", px + 7, py - 3);
+        }
+        // Negative Br
+        if (!Double.isNaN(params[10])) {
+            double px = ((params[9] - scaleMinX) / rangeX) * w;
+            double py = h - ((params[10] - scaleMinY) / rangeY) * h;
+            gc.strokeOval(px - markerR, py - markerR, markerR * 2, markerR * 2);
+            gc.setFont(Font.font("Monospace", FontWeight.BOLD, 10));
+            gc.fillText("Br", px + 7, py - 3);
+        }
+
+        // Bmax marker (cyan)
+        gc.setFill(Color.web("#66ccff"));
+        gc.setStroke(Color.web("#66ccff"));
+        double px = ((params[11] - scaleMinX) / rangeX) * w;
+        double py = h - ((params[12] - scaleMinY) / rangeY) * h;
+        gc.strokeOval(px - markerR, py - markerR, markerR * 2, markerR * 2);
+        gc.setFont(Font.font("Monospace", FontWeight.BOLD, 10));
+        gc.fillText("Bmax", px + 7, py - 3);
     }
 
     private void drawXYPlot(double[] vx, double[] vy, int len) {

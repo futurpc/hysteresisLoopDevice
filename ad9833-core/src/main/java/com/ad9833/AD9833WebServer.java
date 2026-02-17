@@ -604,8 +604,11 @@ public class AD9833WebServer {
                     <canvas id="xyPlot" width="340" height="300"></canvas>
                 </div>
                 <div style="display:flex;flex-direction:column;gap:6px;padding-top:5px">
-                    <span style="font-family:'Courier New',monospace;font-size:16px;color:#00ff88" id="xVpp">X: -- Vpp</span>
-                    <span style="font-family:'Courier New',monospace;font-size:16px;color:#00aaff" id="yVpp">Y: -- Vpp</span>
+                    <span style="font-family:'Courier New',monospace;font-size:14px;color:#00ff88" id="xVpp">X: -- Vpp</span>
+                    <span style="font-family:'Courier New',monospace;font-size:14px;color:#00aaff" id="yVpp">Y: -- Vpp</span>
+                    <span style="font-family:'Courier New',monospace;font-size:14px;color:#ffcc00" id="xyHc">Hc: --</span>
+                    <span style="font-family:'Courier New',monospace;font-size:14px;color:#ff6699" id="xyBr">Br: --</span>
+                    <span style="font-family:'Courier New',monospace;font-size:14px;color:#66ccff" id="xyBmax">Bmax: --</span>
                     <button class="toggle-btn active-ac" id="xyAcBtn" onclick="toggleXYAC()">AC</button>
                     <button class="toggle-btn active" id="xyAutoBtn" onclick="toggleXYAuto()">AUTO</button>
                     <button class="toggle-btn" id="xyPersistBtn" onclick="toggleXYPersist()">PERSIST</button>
@@ -1185,6 +1188,41 @@ public class AD9833WebServer {
             if (i===0) xyCtx.moveTo(px,py); else xyCtx.lineTo(px,py);
         }
         xyCtx.stroke();
+
+        // Compute loop parameters: Hc, Br, Bmax
+        let hcPos=NaN,hcNeg=NaN,brPos=NaN,brNeg=NaN,bmax=-Infinity,bmaxXv=0,bmaxYv=0;
+        for (let i=1;i<len;i++) {
+            if (cy[i-1]<0 && cy[i]>=0) { let f=-cy[i-1]/(cy[i]-cy[i-1]); hcPos=cx[i-1]+f*(cx[i]-cx[i-1]); }
+            else if (cy[i-1]>=0 && cy[i]<0) { let f=cy[i-1]/(cy[i-1]-cy[i]); hcNeg=cx[i-1]+f*(cx[i]-cx[i-1]); }
+            if (cx[i-1]<0 && cx[i]>=0) { let f=-cx[i-1]/(cx[i]-cx[i-1]); brPos=cy[i-1]+f*(cy[i]-cy[i-1]); }
+            else if (cx[i-1]>=0 && cx[i]<0) { let f=cx[i-1]/(cx[i-1]-cx[i]); brNeg=cy[i-1]+f*(cy[i]-cy[i-1]); }
+            if (cy[i]>bmax) { bmax=cy[i]; bmaxXv=cx[i]; bmaxYv=cy[i]; }
+        }
+        let hcVal=NaN,brVal=NaN;
+        if (!isNaN(hcPos)&&!isNaN(hcNeg)) hcVal=(Math.abs(hcPos)+Math.abs(hcNeg))/2;
+        else if (!isNaN(hcPos)) hcVal=Math.abs(hcPos);
+        else if (!isNaN(hcNeg)) hcVal=Math.abs(hcNeg);
+        if (!isNaN(brPos)&&!isNaN(brNeg)) brVal=(Math.abs(brPos)+Math.abs(brNeg))/2;
+        else if (!isNaN(brPos)) brVal=Math.abs(brPos);
+        else if (!isNaN(brNeg)) brVal=Math.abs(brNeg);
+
+        document.getElementById('xyHc').textContent=isNaN(hcVal)?'Hc: --':'Hc: '+hcVal.toFixed(3)+' V';
+        document.getElementById('xyBr').textContent=isNaN(brVal)?'Br: --':'Br: '+brVal.toFixed(3)+' V';
+        document.getElementById('xyBmax').textContent='Bmax: '+bmax.toFixed(3)+' V';
+
+        // Draw markers
+        let mr=5;
+        function drawMarker(xv,yv,color,label) {
+            let px=((xv-xyMinX)/rx)*w, py=h-((yv-xyMinY)/ry)*h;
+            xyCtx.strokeStyle=color; xyCtx.fillStyle=color; xyCtx.lineWidth=1.5;
+            xyCtx.beginPath(); xyCtx.arc(px,py,mr,0,2*Math.PI); xyCtx.stroke();
+            xyCtx.font='bold 10px monospace'; xyCtx.fillText(label,px+7,py-3);
+        }
+        if (!isNaN(hcPos)) drawMarker(hcPos,0,'#ffcc00','Hc');
+        if (!isNaN(hcNeg)) drawMarker(hcNeg,0,'#ffcc00','Hc');
+        if (!isNaN(brPos)) drawMarker(0,brPos,'#ff6699','Br');
+        if (!isNaN(brNeg)) drawMarker(0,brNeg,'#ff6699','Br');
+        drawMarker(bmaxXv,bmaxYv,'#66ccff','Bmax');
     }
 
     function toggleXYAC() {
