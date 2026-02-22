@@ -18,10 +18,6 @@ import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
 import javafx.stage.Stage;
 
-import java.io.FileWriter;
-import java.io.PrintWriter;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 
 /**
@@ -96,7 +92,6 @@ public class SignalAnalyzerApp extends Application {
     private HBox continuousRow;
     private Button[] intervalBtns;
     private Button pauseBtn;
-    private Button exportBtn;
     private volatile int[] lastRawSamples;
     private volatile int[] lastRawSamples2;
 
@@ -356,13 +351,9 @@ public class SignalAnalyzerApp extends Application {
             intSamplesValue.setText(String.valueOf(intervalRawSamples));
         });
 
-        exportBtn = new Button("CSV");
-        exportBtn.setStyle("-fx-background-color: #2196F3; -fx-text-fill: white; -fx-font-size: 12px; -fx-font-weight: bold; -fx-padding: 6 10;");
-        exportBtn.setOnAction(ev -> exportCsv());
-
         intervalRow.getChildren().add(intLabel);
         for (Button b : intervalBtns) intervalRow.getChildren().add(b);
-        intervalRow.getChildren().addAll(pauseBtn, intSamplesLabel, intSamplesSlider, intSamplesValue, exportBtn);
+        intervalRow.getChildren().addAll(pauseBtn, intSamplesLabel, intSamplesSlider, intSamplesValue);
         intervalRow.setVisible(false);
         intervalRow.setManaged(false);
 
@@ -1194,36 +1185,6 @@ public class SignalAnalyzerApp extends Application {
         drawGrid();
     }
 
-    private void exportCsv() {
-        int[] raw1 = lastRawSamples;
-        int[] raw2 = lastRawSamples2;
-        if (raw1 == null || raw1.length == 0) {
-            statusLabel.setText("● No data");
-            statusLabel.setTextFill(Color.YELLOW);
-            return;
-        }
-        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
-        String filename = System.getProperty("user.home") + "/signal_" + timestamp + ".csv";
-        try (PrintWriter pw = new PrintWriter(new FileWriter(filename))) {
-            boolean hasCh2 = dualChannel && raw2 != null && raw2.length > 0;
-            pw.println(hasCh2 ? "index,ch1_raw,ch1_voltage,ch2_raw,ch2_voltage" : "index,ch1_raw,ch1_voltage");
-            int len = raw1.length;
-            for (int i = 0; i < len; i++) {
-                double v1 = (raw1[i] * 3.3) / 4095.0;
-                if (hasCh2 && i < raw2.length) {
-                    double v2 = (raw2[i] * 3.3) / 4095.0;
-                    pw.printf("%d,%d,%.4f,%d,%.4f%n", i, raw1[i], v1, raw2[i], v2);
-                } else {
-                    pw.printf("%d,%d,%.4f%n", i, raw1[i], v1);
-                }
-            }
-            statusLabel.setText("● Saved: " + filename);
-            statusLabel.setTextFill(Color.web("#00aaff"));
-        } catch (Exception e) {
-            statusLabel.setText("● Export error");
-            statusLabel.setTextFill(Color.RED);
-        }
-    }
 
     private void loadConfig() {
         // Channel 1

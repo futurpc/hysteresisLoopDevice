@@ -1,5 +1,16 @@
 # Hysteresis Loop Device
 
+## Hardware
+
+| Component | Description |
+|-----------|-------------|
+| Raspberry Pi 4 | Main controller (Debian 13 Trixie) |
+| AD9833 | Programmable waveform generator (SPI0) — Sine, Triangle, Square up to 12.5 MHz |
+| MCP3208 | 12-bit 8-channel ADC (SPI1) — 0-3.3V input, ~100 ksps |
+| 7" Touchscreen | Display 800x480 |
+
+## Overview
+
 Java application for Raspberry Pi with two modules:
 - **Waveform Generator** - AD9833 programmable waveform generator (Sine, Triangle, Square)
 - **Signal Analyzer** - MCP3208 12-bit ADC for reading and visualizing signals
