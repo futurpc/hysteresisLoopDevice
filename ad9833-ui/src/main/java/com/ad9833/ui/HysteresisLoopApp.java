@@ -162,7 +162,7 @@ public class HysteresisLoopApp extends Application {
 
         // Channel selectors — one row each for visibility
         xChannelSelect = new ComboBox<>();
-        for (int i = 0; i < 8; i++) xChannelSelect.getItems().add("CH" + i);
+        for (int i = 1; i < 8; i++) xChannelSelect.getItems().add("CH" + i);
         xChannelSelect.setValue("CH1");
         xChannelSelect.setStyle("-fx-font-size: 13px;");
         xChannelSelect.setMaxWidth(Double.MAX_VALUE);
@@ -175,7 +175,7 @@ public class HysteresisLoopApp extends Application {
         });
 
         yChannelSelect = new ComboBox<>();
-        for (int i = 0; i < 8; i++) yChannelSelect.getItems().add("CH" + i);
+        for (int i = 1; i < 8; i++) yChannelSelect.getItems().add("CH" + i);
         yChannelSelect.setValue("CH2");
         yChannelSelect.setStyle("-fx-font-size: 13px;");
         yChannelSelect.setMaxWidth(Double.MAX_VALUE);

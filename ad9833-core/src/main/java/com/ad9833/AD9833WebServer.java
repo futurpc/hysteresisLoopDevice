@@ -533,8 +533,8 @@ public class AD9833WebServer {
         <h2>Signal Analyzer</h2>
         <div class="scope-header">
             <span><span class="status-dot stopped" id="scopeDot"></span><span id="scopeStatus">Stopped</span></span>
-            <span class="voltage-display" id="voltageDisplay" style="color:#00ff88">CH1: -- Vpp</span>
-            <span class="voltage-display" id="voltageDisplay2" style="color:#00aaff">CH2: -- Vpp</span>
+            <span class="voltage-display" id="voltageDisplay" style="color:#00ff88">CH3: -- Vpp</span>
+            <span class="voltage-display" id="voltageDisplay2" style="color:#00aaff">-- Vpp</span>
             <span class="measured-freq" id="measuredFreq">-- Hz</span>
         </div>
         <div class="canvas-wrap">
@@ -546,8 +546,7 @@ public class AD9833WebServer {
             <button class="toggle-btn active" id="contBtn" onclick="setMode('cont')">CONT</button>
             <button class="toggle-btn" id="intBtn" onclick="setMode('interval')">INTRVL</button>
             <span style="color:#00ff88;font-size:12px;font-weight:bold">1:</span>
-            <select id="channelSel" onchange="scopeUpdateSettings()" style="width:60px">
-                <option value="0">CH0</option>
+            <select id="channelSel" onchange="scopeUpdateSettings()" style="width:80px">
                 <option value="1">CH1</option>
                 <option value="2">CH2</option>
                 <option value="3" selected>CH3</option>
@@ -557,9 +556,8 @@ public class AD9833WebServer {
                 <option value="7">CH7</option>
             </select>
             <span style="color:#00aaff;font-size:12px;font-weight:bold">2:</span>
-            <select id="channelSel2" onchange="scopeUpdateSettings()" style="width:60px">
+            <select id="channelSel2" onchange="scopeUpdateSettings()" style="width:80px">
                 <option value="off" selected>OFF</option>
-                <option value="0">CH0</option>
                 <option value="1">CH1</option>
                 <option value="2">CH2</option>
                 <option value="3">CH3</option>
@@ -630,12 +628,10 @@ public class AD9833WebServer {
             <label>Frequency</label>
             <input type="range" id="freqSlider" min="0" max="7" step="0.01" value="3">
             <div class="presets">
-                <button class="preset-btn" onclick="setFreq(10)">10</button>
-                <button class="preset-btn" onclick="setFreq(100)">100</button>
+                <button class="preset-btn" onclick="setFreq(200)">200</button>
                 <button class="preset-btn" onclick="setFreq(1000)">1k</button>
+                <button class="preset-btn" onclick="setFreq(2000)">2k</button>
                 <button class="preset-btn" onclick="setFreq(10000)">10k</button>
-                <button class="preset-btn" onclick="setFreq(100000)">100k</button>
-                <button class="preset-btn" onclick="setFreq(1000000)">1M</button>
             </div>
         </div>
         <div class="ctrl-group">
@@ -697,6 +693,22 @@ public class AD9833WebServer {
         dualChannel = document.getElementById('channelSel2').value !== 'off';
         document.getElementById('voltageDisplay2').style.display = dualChannel ? '' : 'none';
         document.getElementById('xySection').style.display = dualChannel ? '' : 'none';
+        updateChannelLabels();
+        // Hot-switch channels while running in continuous mode
+        if (scopeRunning && scopeMode === 'cont') {
+            stopAnalyzer();
+            setTimeout(startAnalyzer, 100);
+        }
+    }
+    function getChName(selId) {
+        let sel = document.getElementById(selId);
+        return sel.options[sel.selectedIndex].text;
+    }
+    function updateChannelLabels() {
+        let ch1Name = getChName('channelSel');
+        let ch2Name = dualChannel ? getChName('channelSel2') : '';
+        document.getElementById('voltageDisplay').textContent = ch1Name + ': -- Vpp';
+        document.getElementById('voltageDisplay2').textContent = ch2Name + ': -- Vpp';
     }
 
     async function startAnalyzer() {
@@ -889,10 +901,10 @@ public class AD9833WebServer {
         document.getElementById('minStat').textContent = 'Min:' + (minV===Infinity ? '--' : (minV>=0?'+':'') + minV.toFixed(2)+'V');
         document.getElementById('maxStat').textContent = 'Max:' + (maxV===-Infinity ? '--' : (maxV>=0?'+':'') + maxV.toFixed(2)+'V');
         if (minV !== Infinity && maxV !== -Infinity) {
-            document.getElementById('voltageDisplay').textContent = 'CH1: ' + (maxV-minV).toFixed(3) + ' Vpp';
+            document.getElementById('voltageDisplay').textContent = getChName('channelSel') + ': ' + (maxV-minV).toFixed(3) + ' Vpp';
         }
         if (dualChannel && minV2 !== Infinity && maxV2 !== -Infinity) {
-            document.getElementById('voltageDisplay2').textContent = 'CH2: ' + (maxV2-minV2).toFixed(3) + ' Vpp';
+            document.getElementById('voltageDisplay2').textContent = getChName('channelSel2') + ': ' + (maxV2-minV2).toFixed(3) + ' Vpp';
         }
     }
 

@@ -72,7 +72,7 @@ Credentials are stored locally in `pi-credentials.local` (not committed to git).
          │  AGND  (pin 6) ─────┼────────────────────► Pin 6  (GND)   │  ◄── MUST CONNECT!
          │                     │                  │                  │
          │  OUT   (pin 7) ─────┼──► Oscilloscope  └──────────────────┘
-         │                     │   or MCP3208 CH0
+         │                     │   or MCP3208 CH1
          └─────────────────────┘
 
 
@@ -131,14 +131,14 @@ Credentials are stored locally in `pi-credentials.local` (not committed to git).
                     MCP3208                           Raspberry Pi
                ┌──────┴──────┐                    ┌──────────────────┐
                │  1 ●    16  │                    │   GPIO Header    │
-        CH0 ───┤  2      15  ├─── VREF            │                  │
-        CH1 ───┤  3      14  ├─── AGND            │  Pin 1  = 3.3V   │
-        CH2 ───┤  4      13  ├─── CLK ──────────────► Pin 40 (GPIO21)│
-        CH3 ───┤  5      12  ├─── DOUT ─────────────► Pin 35 (GPIO19)│
-        CH4 ───┤  6      11  ├─── DIN ──────────────► Pin 38 (GPIO20)│
-        CH5 ───┤  7      10  ├─── CS ───────────────► Pin 12 (GPIO18)│
-        CH6 ───┤  8       9  ├─── DGND              │  Pin 6  = GND   │
-        CH7 ───┤             │                    │                  │
+        CH1 ───┤  2      15  ├─── VREF            │                  │
+        CH2 ───┤  3      14  ├─── AGND            │  Pin 1  = 3.3V   │
+        CH3 ───┤  4      13  ├─── CLK ──────────────► Pin 40 (GPIO21)│
+        CH4 ───┤  5      12  ├─── DOUT ─────────────► Pin 35 (GPIO19)│
+        CH5 ───┤  6      11  ├─── DIN ──────────────► Pin 38 (GPIO20)│
+        CH6 ───┤  7      10  ├─── CS ───────────────► Pin 12 (GPIO18)│
+        CH7 ───┤  8       9  ├─── DGND              │  Pin 6  = GND   │
+               │             │                    │                  │
                └─────────────┘                    └──────────────────┘
 
 
@@ -166,9 +166,8 @@ Credentials are stored locally in `pi-credentials.local` (not committed to git).
 
     ANALOG INPUTS (directly to your signal sources):
 
-         AD9833 OUT ──────────► CH0 (Pin 1)   ← Connect signal here
-         (or other) ──────────► CH1 (Pin 2)
-                    ──────────► CH2 (Pin 3)
+         AD9833 OUT ──────────► CH1 (Pin 2)   ← Connect signal here
+         (or other) ──────────► CH2 (Pin 3)
                     ──────────► CH3 (Pin 4)
                     ──────────► CH4 (Pin 5)
                     ──────────► CH5 (Pin 6)
@@ -189,8 +188,7 @@ Credentials are stored locally in `pi-credentials.local` (not committed to git).
 
 | MCP3208 Pin | Pin # | Connect To | Notes |
 |-------------|-------|------------|-------|
-| CH0 | 1 | Analog input | Channel 0 (0-3.3V) |
-| CH1 | 2 | Analog input | Channel 1 |
+| CH1 | 2 | Analog input | Channel 1 (0-3.3V) |
 | CH2 | 3 | Analog input | Channel 2 |
 | CH3 | 4 | Analog input | Channel 3 |
 | CH4 | 5 | Analog input | Channel 4 |
@@ -263,7 +261,7 @@ DISPLAY=:0 java --module-path /usr/share/openjfx/lib \
 
 ### Signal Analyzer Features
 - Real-time oscilloscope-style waveform display
-- Channel selector (CH0-CH7)
+- Channel selector (CH1-CH7)
 - Live voltage reading
 - Min/Max statistics
 

@@ -164,8 +164,8 @@ public class AD9833App extends Application {
         hzLabel.setStyle("-fx-font-size: 14px;");
 
         // Preset buttons
-        String[] presets = {"100", "440", "1k", "10k", "100k", "1M"};
-        double[] presetValues = {100, 440, 1000, 10000, 100000, 1000000};
+        String[] presets = {"200", "1k", "2k", "10k"};
+        double[] presetValues = {200, 1000, 2000, 10000};
 
         controlRow.getChildren().addAll(frequencyInput, hzLabel);
 

@@ -182,7 +182,7 @@ public class SignalAnalyzerApp extends Application {
         ch1Label.setFont(Font.font("System", FontWeight.BOLD, 12));
 
         channelSelect = new ComboBox<>();
-        for (int i = 0; i < 8; i++) {
+        for (int i = 1; i < 8; i++) {
             channelSelect.getItems().add("CH" + i);
         }
         channelSelect.setValue("CH3");
@@ -204,7 +204,7 @@ public class SignalAnalyzerApp extends Application {
 
         channelSelect2 = new ComboBox<>();
         channelSelect2.getItems().add("OFF");
-        for (int i = 0; i < 8; i++) {
+        for (int i = 1; i < 8; i++) {
             channelSelect2.getItems().add("CH" + i);
         }
         channelSelect2.setValue("CH2");

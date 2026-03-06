@@ -20,7 +20,7 @@
 | VCC | power line (+) | Power |
 | DGND | ground line (-) | Digital ground |
 | AGND | ground line (-) | Analog ground |
-| OUT | CH0 MCP3208 (pin 1) | Signal output |
+| OUT | CH1 MCP3208 (pin 2) | Signal output |
 | 100nF cap | VCC to ground line (-) | Decoupling |
 
 ## MCP3208 ADC (SPI1)
