@@ -17,6 +17,7 @@ Multi-module Maven project with CLI, touchscreen GUI, and web server.
 - **ADC**: MCP3208 12-bit 8-channel on SPI1
 - **Display**: 7-inch touchscreen (800x480)
 - **Reference Clock**: 25 MHz (AD9833 default)
+- **Amplifier**: PAM8610 Class-D stereo (2x15W, 7-15V, 15kΩ input impedance) — use 10µF coupling cap between AD9833 OUT and amp input to block DC offset
 
 ## Raspberry Pi Access
 
@@ -66,9 +67,9 @@ ad9833-controller/
 ├── splash/                           # Boot splash files
 ├── ad9833-core/                      # Shared library
 │   └── src/main/java/com/ad9833/
-│       ├── AD9833Controller.java     # Waveform generator via pigpio CLI (239 lines)
-│       ├── MCP3208Controller.java    # ADC reader, coherent averaging orchestrator (651 lines)
-│       └── AD9833WebServer.java      # Embedded HTTP server for phone control (1318 lines)
+│       ├── AD9833Controller.java     # Waveform generator via pigpio CLI (238 lines)
+│       ├── MCP3208Controller.java    # ADC reader, coherent averaging, shared state (680 lines)
+│       └── AD9833WebServer.java      # Embedded HTTP server for phone control (1379 lines)
 ├── ad9833-cli/                       # Command line interface
 │   └── src/main/java/com/ad9833/cli/
 │       └── Main.java                 # CLI entry point (126 lines)
@@ -76,14 +77,14 @@ ad9833-controller/
     └── src/main/java/com/ad9833/ui/
         ├── Launcher.java             # JAR entry point (12 lines)
         ├── MainMenuApp.java          # Main menu router (329 lines)
-        ├── AD9833App.java            # Waveform generator UI (398 lines)
-        ├── SignalAnalyzerApp.java    # ADC oscilloscope UI (1250 lines)
-        ├── HysteresisLoopApp.java   # B-H curve display UI (1089 lines)
-        ├── WiFiApp.java              # WiFi manager with on-screen keyboard (575 lines)
-        └── ConfigPersistence.java    # Save/load app settings (50 lines)
+        ├── AD9833App.java            # Waveform generator UI (452 lines)
+        ├── SignalAnalyzerApp.java    # ADC oscilloscope UI (1306 lines)
+        ├── HysteresisLoopApp.java   # B-H curve display UI (1137 lines)
+        ├── WiFiApp.java              # WiFi manager with on-screen keyboard (574 lines)
+        └── ConfigPersistence.java    # Save/load app settings (49 lines)
 ```
 
-**Total: ~6,744 lines** (11 Java files, 1 C file)
+**Total: ~6,893 lines** (11 Java files, 1 C file)
 
 ## Implementation Details
 
@@ -111,6 +112,21 @@ Key details:
 - Chebyshev recurrence for efficient basis evaluation
 - Gaussian elimination with partial pivoting for solving normal equations
 - Clipped samples (≤5 or ≥4090) excluded from fit, reconstructed by model
+
+### Bidirectional Sync (Web ↔ Touchscreen)
+
+All state is shared between the touchscreen (JavaFX) and web (phone browser) UIs via singleton controllers:
+- **Generator**: `AD9833Controller.getShared()` — volatile fields for frequency, phase, waveform, running
+- **Analyzer**: `MCP3208Controller.getShared()` — volatile fields + `PropertyChangeSupport` for analyzerActive, analyzerCh1, analyzerCh2
+
+**Event-driven architecture** (analyzer):
+- `MCP3208Controller` fires `PropertyChangeEvent` on state changes (only if value actually changed)
+- Touchscreen apps register `PropertyChangeListener` via `addAnalyzerListener()` for instant notification
+- `syncing` flag prevents ComboBox feedback loops (`.setValue()` triggers `onAction`)
+- Web polls `/api/analyzer/status` every 2s with `syncingFromServer` flag to prevent polling from triggering `onchange` handlers
+- Channel changes use `/api/analyzer/setchannel` (no restart — SSE stream reads channels live each iteration)
+
+**Generator sync**: Web polls `/api/status` every 2s. Both sides read/write `AD9833Controller` directly.
 
 ### AD9833WebServer (Embedded HTTP)
 
@@ -226,3 +242,4 @@ Custom theme with hysteresis loop logo:
 8. **pigpio built from source** - Not in apt repos
 9. **Native C for ADC speed** - Java ProcessBuilder too slow for tight sampling loops
 10. **Clipping handling matters** - Reduce harmonics to K=1 when ADC clips to avoid Gibbs oscillations
+11. **Don't connect low-impedance amps directly to AD9833** - TDA2050 loaded the output causing frequency shifts with volume changes. Replaced with PAM8610 (15kΩ input impedance). Always use a coupling cap (10µF) to block the ~0.3V DC offset

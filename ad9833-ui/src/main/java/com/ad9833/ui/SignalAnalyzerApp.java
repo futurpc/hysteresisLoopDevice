@@ -40,6 +40,8 @@ public class SignalAnalyzerApp extends Application {
     private Runnable onBackAction;
 
     private AnimationTimer timer;
+    private java.beans.PropertyChangeListener analyzerListener;
+    private boolean syncing = false; // prevent ComboBox feedback loops
     private boolean isRunning = false;
     private int selectedChannel = 3;  // Default to CH3
     private int selectedChannel2 = 2; // Default to CH2
@@ -189,10 +191,12 @@ public class SignalAnalyzerApp extends Application {
         channelSelect.setStyle("-fx-font-size: 11px;");
         channelSelect.setPrefWidth(70);
         channelSelect.setOnAction(e -> {
+            if (syncing) return;
             String selected = channelSelect.getValue();
             selectedChannel = Integer.parseInt(selected.substring(2));
             if (controller != null) {
                 controller.setSamplerChannels(selectedChannel, selectedChannel2);
+                controller.setAnalyzerCh1(selectedChannel);
             }
             clearBuffer();
             saveConfig();
@@ -211,6 +215,7 @@ public class SignalAnalyzerApp extends Application {
         channelSelect2.setStyle("-fx-font-size: 11px;");
         channelSelect2.setPrefWidth(70);
         channelSelect2.setOnAction(e -> {
+            if (syncing) return;
             String selected = channelSelect2.getValue();
             if ("OFF".equals(selected)) {
                 dualChannel = false;
@@ -220,6 +225,9 @@ public class SignalAnalyzerApp extends Application {
                 if (controller != null) {
                     controller.setSamplerChannels(selectedChannel, selectedChannel2);
                 }
+            }
+            if (controller != null) {
+                controller.setAnalyzerCh2(dualChannel ? selectedChannel2 : -1);
             }
             clearBuffer();
             saveConfig();
@@ -385,6 +393,45 @@ public class SignalAnalyzerApp extends Application {
             controller = MCP3208Controller.getShared();
             statusLabel.setText("● Ready");
             statusLabel.setTextFill(Color.YELLOW);
+
+            // Event-driven sync: react instantly to shared state changes
+            analyzerListener = evt -> Platform.runLater(() -> {
+                if (controller == null) return;
+                syncing = true;
+                try {
+                    switch (evt.getPropertyName()) {
+                        case "analyzerActive":
+                            boolean active = (Boolean) evt.getNewValue();
+                            if (!active && isRunning) {
+                                stopSampling();
+                            } else if (active && !isRunning) {
+                                startSampling();
+                            }
+                            break;
+                        case "analyzerCh1":
+                            int ch1 = (Integer) evt.getNewValue();
+                            if (ch1 != selectedChannel) {
+                                selectedChannel = ch1;
+                                channelSelect.setValue("CH" + ch1);
+                            }
+                            break;
+                        case "analyzerCh2":
+                            int ch2 = (Integer) evt.getNewValue();
+                            if (ch2 < 0 && dualChannel) {
+                                dualChannel = false;
+                                channelSelect2.setValue("OFF");
+                            } else if (ch2 >= 0 && (!dualChannel || ch2 != selectedChannel2)) {
+                                dualChannel = true;
+                                selectedChannel2 = ch2;
+                                channelSelect2.setValue("CH" + ch2);
+                            }
+                            break;
+                    }
+                } finally {
+                    syncing = false;
+                }
+            });
+            controller.addAnalyzerListener(analyzerListener);
         } catch (Exception e) {
             statusLabel.setText("● Error: " + e.getMessage());
             statusLabel.setTextFill(Color.RED);
@@ -396,6 +443,9 @@ public class SignalAnalyzerApp extends Application {
         if (controller == null) return;
 
         isRunning = true;
+        controller.setAnalyzerCh1(selectedChannel);
+        controller.setAnalyzerCh2(dualChannel ? selectedChannel2 : -1);
+        controller.setAnalyzerActive(true);
         startButton.setDisable(true);
         stopButton.setDisable(false);
         channelSelect.setDisable(true);
@@ -726,6 +776,9 @@ public class SignalAnalyzerApp extends Application {
 
     private void stopSampling() {
         isRunning = false;
+        if (controller != null) {
+            controller.setAnalyzerActive(false);
+        }
         if (timer != null) {
             timer.stop();
             timer = null;
@@ -1239,6 +1292,10 @@ public class SignalAnalyzerApp extends Application {
 
     private void shutdown() {
         saveConfig();
+        if (controller != null && analyzerListener != null) {
+            controller.removeAnalyzerListener(analyzerListener);
+            analyzerListener = null;
+        }
         // Don't close the shared controller — other consumers may still use it
         controller = null;
     }

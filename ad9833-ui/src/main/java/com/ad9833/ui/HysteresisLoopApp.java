@@ -43,6 +43,8 @@ public class HysteresisLoopApp extends Application {
     private Runnable onBackAction;
 
     private AnimationTimer timer;
+    private java.beans.PropertyChangeListener analyzerListener;
+    private boolean syncing = false;
     private boolean isRunning = false;
     private int selectedChannelX = 1;
     private int selectedChannelY = 2;
@@ -167,9 +169,11 @@ public class HysteresisLoopApp extends Application {
         xChannelSelect.setStyle("-fx-font-size: 13px;");
         xChannelSelect.setMaxWidth(Double.MAX_VALUE);
         xChannelSelect.setOnAction(e -> {
+            if (syncing) return;
             selectedChannelX = Integer.parseInt(xChannelSelect.getValue().substring(2));
-            if (controller != null && isRunning) {
-                controller.setSamplerChannels(selectedChannelX, selectedChannelY);
+            if (controller != null) {
+                if (isRunning) controller.setSamplerChannels(selectedChannelX, selectedChannelY);
+                controller.setAnalyzerCh1(selectedChannelX);
             }
             saveConfig();
         });
@@ -180,9 +184,11 @@ public class HysteresisLoopApp extends Application {
         yChannelSelect.setStyle("-fx-font-size: 13px;");
         yChannelSelect.setMaxWidth(Double.MAX_VALUE);
         yChannelSelect.setOnAction(e -> {
+            if (syncing) return;
             selectedChannelY = Integer.parseInt(yChannelSelect.getValue().substring(2));
-            if (controller != null && isRunning) {
-                controller.setSamplerChannels(selectedChannelX, selectedChannelY);
+            if (controller != null) {
+                if (isRunning) controller.setSamplerChannels(selectedChannelX, selectedChannelY);
+                controller.setAnalyzerCh2(selectedChannelY);
             }
             saveConfig();
         });
@@ -343,6 +349,39 @@ public class HysteresisLoopApp extends Application {
             controller = MCP3208Controller.getShared();
             statusLabel.setText("● Ready");
             statusLabel.setTextFill(Color.YELLOW);
+
+            // Event-driven sync: listen for external changes to shared state
+            analyzerListener = evt -> Platform.runLater(() -> {
+                if (controller == null) return;
+                syncing = true;
+                try {
+                    switch (evt.getPropertyName()) {
+                        case "analyzerActive":
+                            boolean active = (Boolean) evt.getNewValue();
+                            if (!active && isRunning) {
+                                stopSampling();
+                            } else if (active && !isRunning) {
+                                startSampling();
+                            }
+                            break;
+                        case "analyzerCh1":
+                            int ch1 = (Integer) evt.getNewValue();
+                            if (ch1 != selectedChannelX) {
+                                selectedChannelX = ch1;
+                                xChannelSelect.setValue("CH" + ch1);
+                            }
+                            break;
+                        case "analyzerCh2":
+                            int ch2 = (Integer) evt.getNewValue();
+                            if (ch2 >= 0 && ch2 != selectedChannelY) {
+                                selectedChannelY = ch2;
+                                yChannelSelect.setValue("CH" + ch2);
+                            }
+                            break;
+                    }
+                } finally { syncing = false; }
+            });
+            controller.addAnalyzerListener(analyzerListener);
         } catch (Exception e) {
             statusLabel.setText("● Error: " + e.getMessage());
             statusLabel.setTextFill(Color.RED);
@@ -354,6 +393,9 @@ public class HysteresisLoopApp extends Application {
         if (controller == null) return;
 
         isRunning = true;
+        controller.setAnalyzerCh1(selectedChannelX);
+        controller.setAnalyzerCh2(selectedChannelY);
+        controller.setAnalyzerActive(true);
         startButton.setDisable(true);
         stopButton.setDisable(false);
         xChannelSelect.setDisable(true);
@@ -676,6 +718,9 @@ public class HysteresisLoopApp extends Application {
 
     private void stopSampling() {
         isRunning = false;
+        if (controller != null) {
+            controller.setAnalyzerActive(false);
+        }
         if (timer != null) {
             timer.stop();
             timer = null;
@@ -1079,6 +1124,10 @@ public class HysteresisLoopApp extends Application {
 
     private void shutdown() {
         saveConfig();
+        if (controller != null && analyzerListener != null) {
+            controller.removeAnalyzerListener(analyzerListener);
+            analyzerListener = null;
+        }
         controller = null;
     }
 

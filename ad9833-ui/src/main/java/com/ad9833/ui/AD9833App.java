@@ -3,6 +3,8 @@ package com.ad9833.ui;
 import com.ad9833.AD9833Controller;
 import com.ad9833.AD9833Controller.Waveform;
 
+import javafx.animation.KeyFrame;
+import javafx.animation.Timeline;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
@@ -15,6 +17,7 @@ import javafx.scene.paint.Color;
 import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
 import javafx.stage.Stage;
+import javafx.util.Duration;
 
 public class AD9833App extends Application {
 
@@ -28,6 +31,7 @@ public class AD9833App extends Application {
     private Button startButton;
     private Button stopButton;
     private Runnable onBackAction;
+    private Timeline syncTimeline;
 
     private boolean isRunning = false;
 
@@ -305,6 +309,54 @@ public class AD9833App extends Application {
             statusLabel.setTextFill(Color.RED);
             startButton.setDisable(true);
         }
+
+        // Poll controller state every 2s to sync with web server changes
+        syncTimeline = new Timeline(new KeyFrame(Duration.seconds(2), event -> {
+            if (controller == null) return;
+            try {
+                boolean controllerRunning = controller.isRunning();
+                if (controllerRunning != isRunning) {
+                    isRunning = controllerRunning;
+                    if (isRunning) {
+                        statusLabel.setText("● Running");
+                        statusLabel.setTextFill(Color.LIME);
+                        startButton.setDisable(true);
+                        stopButton.setDisable(false);
+                    } else {
+                        statusLabel.setText("● Stopped");
+                        statusLabel.setTextFill(Color.RED);
+                        startButton.setDisable(false);
+                        stopButton.setDisable(true);
+                    }
+                }
+
+                double freq = controller.getFrequency();
+                double sliderFreq = Math.pow(10, frequencySlider.getValue());
+                if (freq > 0 && Math.abs(freq - sliderFreq) / freq > 0.001) {
+                    frequencySlider.setValue(Math.log10(freq));
+                    frequencyInput.setText(String.format("%.0f", freq));
+                    frequencyDisplay.setText(formatFrequency(freq));
+                }
+
+                double phase = controller.getPhase();
+                if (Math.abs(phase - phaseSlider.getValue()) > 0.5) {
+                    phaseSlider.setValue(phase);
+                }
+
+                Waveform waveform = controller.getWaveform();
+                Toggle selected = waveformGroup.getSelectedToggle();
+                if (selected == null || selected.getUserData() != waveform) {
+                    for (Toggle toggle : waveformGroup.getToggles()) {
+                        if (toggle.getUserData() == waveform) {
+                            toggle.setSelected(true);
+                            break;
+                        }
+                    }
+                }
+            } catch (Exception ignored) {}
+        }));
+        syncTimeline.setCycleCount(Timeline.INDEFINITE);
+        syncTimeline.play();
     }
 
     private void startOutput() {
@@ -387,6 +439,9 @@ public class AD9833App extends Application {
     }
 
     private void shutdown() {
+        if (syncTimeline != null) {
+            syncTimeline.stop();
+        }
         // Don't close the shared controller — keep generator running while switching views
         controller = null;
     }

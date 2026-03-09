@@ -32,9 +32,9 @@ public class AD9833Controller implements AutoCloseable {
     private final boolean verbose;
     private int spiHandle = -1;
 
-    private double currentFrequency = 0;
-    private double currentPhase = 0;
-    private Waveform currentWaveform = Waveform.SINE;
+    private volatile double currentFrequency = 0;
+    private volatile double currentPhase = 0;
+    private volatile Waveform currentWaveform = Waveform.SINE;
     private volatile boolean running = false;
 
     // Singleton

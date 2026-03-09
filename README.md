@@ -11,27 +11,36 @@
 
 ## Overview
 
-Java application for Raspberry Pi with two modules:
+Java application for Raspberry Pi with three modules:
 - **Waveform Generator** - AD9833 programmable waveform generator (Sine, Triangle, Square)
-- **Signal Analyzer** - MCP3208 12-bit ADC for reading and visualizing signals
+- **Signal Analyzer** - MCP3208 12-bit ADC oscilloscope with coherent averaging
+- **Hysteresis Loop** - Dual-channel X-Y plot for B-H curves
+
+All modules are controllable from both the 7-inch touchscreen and a phone browser (port 8080) with full bidirectional sync.
 
 ## Project Structure
 
 ```
 ad9833-controller/
 ├── pom.xml                    # Parent POM (multi-module)
+├── native/                    # C native code (runs on Pi)
+│   └── adc_coherent.c              # MCP3208 sampler with coherent averaging
 ├── ad9833-core/               # Shared library
 │   └── src/main/java/com/ad9833/
-│       ├── AD9833Controller.java   # Waveform generator
-│       └── MCP3208Controller.java  # ADC reader
+│       ├── AD9833Controller.java   # Waveform generator (singleton, shared state)
+│       ├── MCP3208Controller.java  # ADC reader, coherent averaging, shared state
+│       └── AD9833WebServer.java    # Embedded HTTP server for phone control
 ├── ad9833-cli/                # Command line interface
 │   └── src/main/java/com/ad9833/cli/Main.java
 └── ad9833-ui/                 # JavaFX touchscreen GUI
     └── src/main/java/com/ad9833/ui/
+        ├── Launcher.java           # JAR entry point
         ├── MainMenuApp.java        # Main menu router
-        ├── AD9833App.java          # Generator UI
-        ├── SignalAnalyzerApp.java  # ADC visualization UI
-        └── Launcher.java           # JAR entry point
+        ├── AD9833App.java          # Waveform generator UI
+        ├── SignalAnalyzerApp.java  # ADC oscilloscope UI
+        ├── HysteresisLoopApp.java  # B-H curve X-Y plot UI
+        ├── WiFiApp.java            # WiFi manager with on-screen keyboard
+        └── ConfigPersistence.java  # Save/load app settings
 ```
 
 ## Raspberry Pi Connection
@@ -250,20 +259,36 @@ DISPLAY=:0 java --module-path /usr/share/openjfx/lib \
 ### Main Menu
 - **WAVEFORM GENERATOR** - Control AD9833 output
 - **SIGNAL ANALYZER** - Read and visualize MCP3208 ADC
+- **HYSTERESIS LOOP** - Dual-channel X-Y plot for B-H curves
 - **WIFI** - Manage WiFi connections with on-screen keyboard
 - **QR Code** - Scan to open web control panel on your phone (port 8080)
 
 ### Waveform Generator Features
-- Frequency slider with presets (100, 440, 1k, 10k, 100k, 1M Hz)
+- Frequency slider with presets (200, 1k, 2k, 10k Hz)
 - Phase control (0-360°)
 - Waveform selection (Sine, Triangle, Square)
 - START/STOP buttons
 
 ### Signal Analyzer Features
-- Real-time oscilloscope-style waveform display
-- Channel selector (CH1-CH7)
-- Live voltage reading
-- Min/Max statistics
+- Real-time oscilloscope-style waveform display with coherent averaging
+- Dual-channel support (CH1-CH7)
+- Live Vpp and frequency measurement
+- Continuous and interval modes with CSV export
+- Auto-scale, AC coupling, trigger
+
+### Hysteresis Loop Features
+- Dual-channel coherent capture (X and Y axes)
+- X-Y parametric plot of B-H curves
+- Loop parameters: Hc (coercivity), Br (remanence), Bmax
+- Persistence mode, auto-scale, AC coupling
+- Continuous and interval modes
+
+### Web ↔ Touchscreen Sync
+All controls are bidirectionally synced between the touchscreen and the web UI:
+- Start/stop on either side immediately starts/stops the other
+- Channel changes propagate between interfaces
+- Uses event-driven architecture (PropertyChangeSupport) for instant touchscreen sync
+- Web polls every 2 seconds for external changes
 
 ## CLI Usage
 

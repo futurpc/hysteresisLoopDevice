@@ -22,15 +22,8 @@ public class AD9833WebServer {
     private HttpServer server;
     private AD9833Controller controller;
     private MCP3208Controller adcController;
-    private boolean isRunning = false;
-    private double currentFrequency = 1000;
-    private double currentPhase = 0;
-    private String currentWaveform = "SINE";
 
-    // Analyzer state
-    private volatile boolean analyzerRunning = false;
-    private int analyzerChannel = 3;
-    private int analyzerChannel2 = -1; // -1 = OFF
+    // Analyzer state (web-specific display params only; running/channel state in adcController)
     private int analyzerSamplesPerFrame = 1000;
     private volatile int[] lastRawCh1;
     private volatile int[] lastRawCh2;
@@ -41,7 +34,7 @@ public class AD9833WebServer {
 
     public AD9833WebServer(int port, MCP3208Controller externalAdc) throws Exception {
         try {
-            controller = new AD9833Controller();
+            controller = AD9833Controller.getShared();
         } catch (Exception e) {
             System.err.println("AD9833 not available: " + e.getMessage());
         }
@@ -71,6 +64,8 @@ public class AD9833WebServer {
         server.createContext("/api/analyzer/stop", new AnalyzerStopHandler());
         server.createContext("/api/analyzer/sample", new AnalyzerIntervalHandler());
         server.createContext("/api/analyzer/csv", new AnalyzerCsvHandler());
+        server.createContext("/api/analyzer/status", new AnalyzerStatusHandler());
+        server.createContext("/api/analyzer/setchannel", new AnalyzerSetChannelHandler());
 
         server.setExecutor(Executors.newCachedThreadPool());
     }
@@ -82,20 +77,16 @@ public class AD9833WebServer {
     }
 
     public void stop() {
-        if (analyzerRunning) {
-            analyzerRunning = false;
-            if (adcController != null) {
-                adcController.stopContinuousSampling();
-            }
+        if (adcController != null && adcController.isAnalyzerActive()) {
+            adcController.setAnalyzerActive(false);
         }
-        if (isRunning && controller != null) {
+        if (controller != null && controller.isRunning()) {
             try {
                 controller.stop();
             } catch (Exception e) {
                 e.printStackTrace();
             }
         }
-        if (controller != null) controller.close();
         server.stop(0);
     }
 
@@ -118,10 +109,10 @@ public class AD9833WebServer {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
             try {
-                controller.setFrequency(currentFrequency);
-                controller.setPhase(currentPhase);
-                controller.setWaveform(AD9833Controller.Waveform.valueOf(currentWaveform));
-                isRunning = true;
+                controller.setFrequency(controller.getFrequency());
+                controller.setPhase(controller.getPhase());
+                controller.setWaveform(controller.getWaveform());
+                controller.setRunning(true);
                 sendJson(exchange, "{\"status\":\"ok\",\"running\":true}");
             } catch (Exception e) {
                 sendJson(exchange, "{\"status\":\"error\",\"message\":\"" + e.getMessage() + "\"}");
@@ -134,7 +125,6 @@ public class AD9833WebServer {
         public void handle(HttpExchange exchange) throws IOException {
             try {
                 controller.stop();
-                isRunning = false;
                 sendJson(exchange, "{\"status\":\"ok\",\"running\":false}");
             } catch (Exception e) {
                 sendJson(exchange, "{\"status\":\"error\",\"message\":\"" + e.getMessage() + "\"}");
@@ -150,20 +140,17 @@ public class AD9833WebServer {
                 Map<String, String> params = parseQuery(query);
 
                 if (params.containsKey("freq")) {
-                    currentFrequency = Double.parseDouble(params.get("freq"));
-                    if (isRunning) controller.setFrequency(currentFrequency);
+                    controller.setFrequency(Double.parseDouble(params.get("freq")));
                 }
                 if (params.containsKey("phase")) {
-                    currentPhase = Double.parseDouble(params.get("phase"));
-                    if (isRunning) controller.setPhase(currentPhase);
+                    controller.setPhase(Double.parseDouble(params.get("phase")));
                 }
                 if (params.containsKey("wave")) {
-                    currentWaveform = params.get("wave").toUpperCase();
-                    if (isRunning) controller.setWaveform(AD9833Controller.Waveform.valueOf(currentWaveform));
+                    controller.setWaveform(AD9833Controller.Waveform.valueOf(params.get("wave").toUpperCase()));
                 }
 
-                sendJson(exchange, "{\"status\":\"ok\",\"freq\":" + currentFrequency +
-                         ",\"phase\":" + currentPhase + ",\"wave\":\"" + currentWaveform + "\"}");
+                sendJson(exchange, "{\"status\":\"ok\",\"freq\":" + controller.getFrequency() +
+                         ",\"phase\":" + controller.getPhase() + ",\"wave\":\"" + controller.getWaveform().name() + "\"}");
             } catch (Exception e) {
                 sendJson(exchange, "{\"status\":\"error\",\"message\":\"" + e.getMessage() + "\"}");
             }
@@ -173,10 +160,10 @@ public class AD9833WebServer {
     private class StatusHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
-            sendJson(exchange, "{\"running\":" + isRunning +
-                     ",\"freq\":" + currentFrequency +
-                     ",\"phase\":" + currentPhase +
-                     ",\"wave\":\"" + currentWaveform + "\"}");
+            sendJson(exchange, "{\"running\":" + controller.isRunning() +
+                     ",\"freq\":" + controller.getFrequency() +
+                     ",\"phase\":" + controller.getPhase() +
+                     ",\"wave\":\"" + controller.getWaveform().name() + "\"}");
         }
     }
 
@@ -187,17 +174,19 @@ public class AD9833WebServer {
         public void handle(HttpExchange exchange) throws IOException {
             String query = exchange.getRequestURI().getQuery();
             Map<String, String> params = parseQuery(query);
-            if (params.containsKey("channel")) {
-                analyzerChannel = Integer.parseInt(params.get("channel"));
+            if (adcController != null) {
+                if (params.containsKey("channel")) {
+                    adcController.setAnalyzerCh1(Integer.parseInt(params.get("channel")));
+                }
+                if (params.containsKey("channel2")) {
+                    String ch2 = params.get("channel2");
+                    adcController.setAnalyzerCh2("off".equalsIgnoreCase(ch2) ? -1 : Integer.parseInt(ch2));
+                }
+                if (params.containsKey("samples")) {
+                    analyzerSamplesPerFrame = Integer.parseInt(params.get("samples"));
+                }
+                adcController.setAnalyzerActive(true);
             }
-            if (params.containsKey("channel2")) {
-                String ch2 = params.get("channel2");
-                analyzerChannel2 = "off".equalsIgnoreCase(ch2) ? -1 : Integer.parseInt(ch2);
-            }
-            if (params.containsKey("samples")) {
-                analyzerSamplesPerFrame = Integer.parseInt(params.get("samples"));
-            }
-            analyzerRunning = true;
             sendJson(exchange, "{\"status\":\"ok\",\"running\":true}");
         }
     }
@@ -205,7 +194,9 @@ public class AD9833WebServer {
     private class AnalyzerStopHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
-            analyzerRunning = false;
+            if (adcController != null) {
+                adcController.setAnalyzerActive(false);
+            }
             sendJson(exchange, "{\"status\":\"ok\",\"running\":false}");
         }
     }
@@ -220,22 +211,17 @@ public class AD9833WebServer {
             exchange.sendResponseHeaders(200, 0);
 
             try (OutputStream os = exchange.getResponseBody()) {
-                while (analyzerRunning) {
-                    if (adcController == null) {
-                        String msg = "data: {\"error\":\"ADC not available\"}\n\n";
-                        os.write(msg.getBytes(StandardCharsets.UTF_8));
-                        os.flush();
-                        break;
-                    }
-
+                while (adcController != null && adcController.isAnalyzerActive()) {
                     try {
+                        int ch1 = adcController.getAnalyzerCh1();
+                        int ch2 = adcController.getAnalyzerCh2();
                         StringBuilder sb = new StringBuilder("data: {\"v\":[");
                         int rawSamples = Math.max(analyzerSamplesPerFrame, 10000);
                         int targetPoints = 2000;
 
-                        if (analyzerChannel2 >= 0) {
+                        if (ch2 >= 0) {
                             MCP3208Controller.CoherentResult[] cr =
-                                adcController.sampleCoherentDual(analyzerChannel, analyzerChannel2,
+                                adcController.sampleCoherentDual(ch1, ch2,
                                                                   targetPoints, rawSamples);
                             if (cr != null && cr[0].cyclesAveraged > 0) {
                                 lastRawCh1 = cr[0].averagedValues;
@@ -258,7 +244,7 @@ public class AD9833WebServer {
                             }
                         } else {
                             MCP3208Controller.CoherentResult cr =
-                                adcController.sampleCoherent(analyzerChannel, targetPoints, rawSamples);
+                                adcController.sampleCoherent(ch1, targetPoints, rawSamples);
                             if (cr != null && cr.cyclesAveraged > 0) {
                                 lastRawCh1 = cr.averagedValues;
                                 lastRawCh2 = null;
@@ -302,7 +288,7 @@ public class AD9833WebServer {
             try {
                 String query = exchange.getRequestURI().getQuery();
                 Map<String, String> params = parseQuery(query);
-                int ch1 = params.containsKey("channel") ? Integer.parseInt(params.get("channel")) : analyzerChannel;
+                int ch1 = params.containsKey("channel") ? Integer.parseInt(params.get("channel")) : (adcController != null ? adcController.getAnalyzerCh1() : 3);
                 int ch2 = -1;
                 if (params.containsKey("channel2")) {
                     String c2 = params.get("channel2");
@@ -389,6 +375,39 @@ public class AD9833WebServer {
             } catch (Exception e) {
                 sendJson(exchange, "{\"error\":\"" + e.getMessage() + "\"}");
             }
+        }
+    }
+
+    private class AnalyzerStatusHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            boolean running = adcController != null && adcController.isAnalyzerActive();
+            int ch1 = adcController != null ? adcController.getAnalyzerCh1() : 3;
+            int ch2 = adcController != null ? adcController.getAnalyzerCh2() : -1;
+            sendJson(exchange, "{\"running\":" + running +
+                     ",\"channel\":" + ch1 +
+                     ",\"channel2\":" + ch2 + "}");
+        }
+    }
+
+    private class AnalyzerSetChannelHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (adcController == null) {
+                sendJson(exchange, "{\"error\":\"ADC not available\"}");
+                return;
+            }
+            String query = exchange.getRequestURI().getQuery();
+            Map<String, String> params = parseQuery(query);
+            if (params.containsKey("channel")) {
+                adcController.setAnalyzerCh1(Integer.parseInt(params.get("channel")));
+            }
+            if (params.containsKey("channel2")) {
+                String ch2 = params.get("channel2");
+                adcController.setAnalyzerCh2("off".equalsIgnoreCase(ch2) ? -1 : Integer.parseInt(ch2));
+            }
+            sendJson(exchange, "{\"status\":\"ok\",\"channel\":" + adcController.getAnalyzerCh1() +
+                     ",\"channel2\":" + adcController.getAnalyzerCh2() + "}");
         }
     }
 
@@ -669,6 +688,7 @@ public class AD9833WebServer {
     let intervalPaused = false;
     let intervalTimer = null;
 
+    let syncingFromServer = false;
     let autoScale = true, acCoupling = true, triggerEnabled = true;
     let triggerLevel = 0.1;
     let scaleMin = -1.65, scaleMax = 1.65;
@@ -689,16 +709,16 @@ public class AD9833WebServer {
         document.getElementById('trigBtn').className = triggerEnabled ? 'toggle-btn active' : 'toggle-btn';
     }
     function scopeUpdateSettings() {
+        if (syncingFromServer) return;
         buffer.fill(0); buffer2.fill(0); bufferIndex = 0;
         dualChannel = document.getElementById('channelSel2').value !== 'off';
         document.getElementById('voltageDisplay2').style.display = dualChannel ? '' : 'none';
         document.getElementById('xySection').style.display = dualChannel ? '' : 'none';
         updateChannelLabels();
-        // Hot-switch channels while running in continuous mode
-        if (scopeRunning && scopeMode === 'cont') {
-            stopAnalyzer();
-            setTimeout(startAnalyzer, 100);
-        }
+        // Write channel changes to shared state (stream reads channels live, no restart needed)
+        let ch = document.getElementById('channelSel').value;
+        let ch2 = document.getElementById('channelSel2').value;
+        fetch('/api/analyzer/setchannel?channel=' + ch + '&channel2=' + ch2);
     }
     function getChName(selId) {
         let sel = document.getElementById(selId);
@@ -1271,17 +1291,61 @@ public class AD9833WebServer {
     function genStart() { fetch('/api/start').then(r=>r.json()).then(d=>{ if(d.running){genRunning=true;document.getElementById('genDot').className='status-dot running';document.getElementById('genStatus').textContent='Running';} }); }
     function genStop() { fetch('/api/stop').then(r=>r.json()).then(d=>{ genRunning=false;document.getElementById('genDot').className='status-dot stopped';document.getElementById('genStatus').textContent='Stopped'; }); }
 
-    // Load current generator state
-    fetch('/api/status').then(r=>r.json()).then(d=>{
-        genRunning=d.running; currentFreq=d.freq; currentPhase=d.phase; currentWave=d.wave;
-        freqSlider.value=Math.log10(currentFreq);
-        document.getElementById('genFreqDisplay').textContent=formatFreq(currentFreq);
-        phaseSlider.value=currentPhase;
-        document.getElementById('phaseValue').textContent=currentPhase+'\u00b0';
-        document.querySelectorAll('.wave-btn').forEach(b=>b.classList.remove('active'));
-        document.getElementById(currentWave.toLowerCase()+'Btn').classList.add('active');
-        if(genRunning){document.getElementById('genDot').className='status-dot running';document.getElementById('genStatus').textContent='Running';}
-    });
+    // Load current generator state and start polling
+    function applyStatus(d) {
+        if (d.freq !== currentFreq) {
+            currentFreq = d.freq;
+            freqSlider.value = Math.log10(currentFreq);
+            document.getElementById('genFreqDisplay').textContent = formatFreq(currentFreq);
+        }
+        if (d.phase !== currentPhase) {
+            currentPhase = d.phase;
+            phaseSlider.value = currentPhase;
+            document.getElementById('phaseValue').textContent = currentPhase + '\u00b0';
+        }
+        if (d.wave !== currentWave) {
+            currentWave = d.wave;
+            document.querySelectorAll('.wave-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById(currentWave.toLowerCase() + 'Btn').classList.add('active');
+        }
+        if (d.running !== genRunning) {
+            genRunning = d.running;
+            document.getElementById('genDot').className = genRunning ? 'status-dot running' : 'status-dot stopped';
+            document.getElementById('genStatus').textContent = genRunning ? 'Running' : 'Stopped';
+        }
+    }
+    fetch('/api/status').then(r=>r.json()).then(applyStatus);
+    setInterval(() => { fetch('/api/status').then(r=>r.json()).then(applyStatus).catch(()=>{}); }, 2000);
+
+    // ===== ANALYZER SYNC =====
+    function applyAnalyzerStatus(d) {
+        syncingFromServer = true;
+        try {
+            // Update channel selectors if changed externally
+            let ch1Sel = document.getElementById('channelSel');
+            if (String(d.channel) !== ch1Sel.value) {
+                ch1Sel.value = String(d.channel);
+            }
+            let ch2Sel = document.getElementById('channelSel2');
+            let ch2Val = d.channel2 < 0 ? 'off' : String(d.channel2);
+            if (ch2Val !== ch2Sel.value) {
+                ch2Sel.value = ch2Val;
+                dualChannel = ch2Val !== 'off';
+                document.getElementById('voltageDisplay2').style.display = dualChannel ? '' : 'none';
+                document.getElementById('xySection').style.display = dualChannel ? '' : 'none';
+                updateChannelLabels();
+            }
+            // Sync running state
+            if (d.running && !scopeRunning) {
+                // Started externally — actually start sampling
+                startScope();
+            } else if (!d.running && scopeRunning) {
+                // Stopped externally
+                stopScope();
+            }
+        } finally { syncingFromServer = false; }
+    }
+    setInterval(() => { fetch('/api/analyzer/status').then(r=>r.json()).then(applyAnalyzerStatus).catch(()=>{}); }, 2000);
 </script>
 </body>
 </html>

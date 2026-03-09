@@ -1,5 +1,7 @@
 package com.ad9833;
 
+import java.beans.PropertyChangeListener;
+import java.beans.PropertyChangeSupport;
 import java.io.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -54,6 +56,12 @@ public class MCP3208Controller implements AutoCloseable {
     private volatile double latestFrequency = 0;
     private final AtomicInteger activeConsumers = new AtomicInteger(0);
 
+    // Shared analyzer state for web/touchscreen sync (event-driven)
+    private final PropertyChangeSupport analyzerPcs = new PropertyChangeSupport(this);
+    private volatile boolean analyzerActive = false;
+    private volatile int analyzerCh1 = 3;
+    private volatile int analyzerCh2 = -1; // -1 = OFF (single channel)
+
     // Dual-channel mode for X-Y plotting
     private volatile int samplerChannelY = -1;  // -1 = single-channel mode
     private volatile int[] latestRawSamplesX = new int[0];
@@ -104,6 +112,28 @@ public class MCP3208Controller implements AutoCloseable {
             sharedInstance = new MCP3208Controller();
         }
         return sharedInstance;
+    }
+
+    public void addAnalyzerListener(PropertyChangeListener l) { analyzerPcs.addPropertyChangeListener(l); }
+    public void removeAnalyzerListener(PropertyChangeListener l) { analyzerPcs.removePropertyChangeListener(l); }
+
+    public boolean isAnalyzerActive() { return analyzerActive; }
+    public void setAnalyzerActive(boolean active) {
+        boolean old = this.analyzerActive;
+        this.analyzerActive = active;
+        if (old != active) analyzerPcs.firePropertyChange("analyzerActive", old, active);
+    }
+    public int getAnalyzerCh1() { return analyzerCh1; }
+    public void setAnalyzerCh1(int ch) {
+        int old = this.analyzerCh1;
+        this.analyzerCh1 = ch;
+        if (old != ch) analyzerPcs.firePropertyChange("analyzerCh1", old, ch);
+    }
+    public int getAnalyzerCh2() { return analyzerCh2; }
+    public void setAnalyzerCh2(int ch) {
+        int old = this.analyzerCh2;
+        this.analyzerCh2 = ch;
+        if (old != ch) analyzerPcs.firePropertyChange("analyzerCh2", old, ch);
     }
 
     private void log(String format, Object... args) {
